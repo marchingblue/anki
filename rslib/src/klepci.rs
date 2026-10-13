@@ -15,6 +15,63 @@ use klepci_sync::NoteSnapshot;
 use crate::prelude::*;
 use crate::search::SortMode;
 
+/// Card HTML to readable plain text. Canonical version shared by the Rust
+/// frontends (mobile ports keep their own one-liner copies).
+pub fn html_to_text(html: &str) -> String {
+    let mut out = html
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("</p>", "\n")
+        .replace("</div>", "\n")
+        .replace("</li>", "\n")
+        .replace("<li>", "\n• ");
+    // [sound:name] -> placeholder
+    while let Some(start) = out.find("[sound:") {
+        let Some(end) = out[start..].find(']') else {
+            break;
+        };
+        out.replace_range(start..start + end + 1, "🔊");
+    }
+    // <img ...> -> placeholder
+    while let Some(start) = out.find("<img") {
+        let Some(end) = out[start..].find('>') else {
+            break;
+        };
+        out.replace_range(start..start + end + 1, "[image]");
+    }
+    // strip remaining tags
+    let mut text = String::with_capacity(out.len());
+    let mut inside = false;
+    for ch in out.chars() {
+        match ch {
+            '<' => inside = true,
+            '>' => inside = false,
+            _ if !inside => text.push(ch),
+            _ => {}
+        }
+    }
+    text.replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// One browser row. Public klepci API.
+#[derive(Debug, Clone)]
+pub struct BrowserRow {
+    pub id: i64,
+    pub deck: String,
+    pub preview: String,
+}
+
 impl Collection {
     /// Export notes matching `search` as guid-keyed snapshots, sorted by guid.
     /// Public klepci API (read-only; the collection format is untouched).
@@ -131,6 +188,102 @@ impl Collection {
         }
         Ok(report)
     }
+
+    /// Unique sorted note ids for the given card ids.
+    fn note_ids_for_cids(&mut self, cids: &[i64]) -> Result<Vec<NoteId>> {
+        let mut nids = BTreeSet::new();
+        for cid in cids {
+            let card = self
+                .storage
+                .get_card(CardId(*cid))?
+                .or_not_found(CardId(*cid))?;
+            nids.insert(card.note_id);
+        }
+        Ok(nids.into_iter().collect())
+    }
+
+    /// Browser rows for `search`, capped at `limit`. Preview is plain text
+    /// truncated to 120 chars.
+    pub fn browser_cards_for_search(
+        &mut self,
+        search: &str,
+        limit: usize,
+    ) -> Result<Vec<BrowserRow>> {
+        let cids = self.search_cards(search, SortMode::NoOrder)?;
+        let mut rows = Vec::new();
+        for cid in cids.into_iter().take(limit) {
+            let card = self.storage.get_card(cid)?.or_not_found(cid)?;
+            let deck = self
+                .storage
+                .get_deck(card.deck_id)?
+                .or_not_found(card.deck_id)?;
+            let question = self
+                .render_existing_card(cid, true, false)?
+                .question()
+                .into_owned();
+            let preview: String = html_to_text(&question).chars().take(120).collect();
+            rows.push(BrowserRow {
+                id: cid.0,
+                deck: deck.human_name(),
+                preview,
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Suspend (`suspend=true`) or unsuspend the given cards.
+    pub fn suspend_cards(&mut self, cids: &[i64], suspend: bool) -> Result<()> {
+        use anki_proto::scheduler::bury_or_suspend_cards_request::Mode;
+        let ids: Vec<CardId> = cids.iter().map(|cid| CardId(*cid)).collect();
+        if suspend {
+            self.bury_or_suspend_cards(&ids, Mode::Suspend)
+                .map(|_| ())?;
+        } else {
+            self.unbury_or_unsuspend_cards(&ids).map(|_| ())?;
+        }
+        Ok(())
+    }
+
+    /// Bury the given cards until tomorrow.
+    pub fn bury_cards(&mut self, cids: &[i64]) -> Result<()> {
+        use anki_proto::scheduler::bury_or_suspend_cards_request::Mode;
+        let ids: Vec<CardId> = cids.iter().map(|cid| CardId(*cid)).collect();
+        self.bury_or_suspend_cards(&ids, Mode::BuryUser)
+            .map(|_| ())?;
+        Ok(())
+    }
+
+    /// Delete the notes behind the given cards. Returns notes removed.
+    pub fn delete_cards(&mut self, cids: &[i64]) -> Result<u32> {
+        let nids = self.note_ids_for_cids(cids)?;
+        if nids.is_empty() {
+            return Ok(0);
+        }
+        self.remove_notes(&nids).map(|_| ())?;
+        Ok(nids.len() as u32)
+    }
+
+    /// Move the given cards to another deck.
+    pub fn set_deck_for_cards(&mut self, cids: &[i64], deck_id: i64) -> Result<()> {
+        let ids: Vec<CardId> = cids.iter().map(|cid| CardId(*cid)).collect();
+        self.set_deck(&ids, DeckId(deck_id)).map(|_| ())?;
+        Ok(())
+    }
+
+    /// Add (`add=true`) or remove a whitespace-separated tag on the notes
+    /// behind the given cards.
+    pub fn tag_cards(&mut self, cids: &[i64], tags: &str, add: bool) -> Result<()> {
+        let nids = self.note_ids_for_cids(cids)?;
+        if nids.is_empty() {
+            return Ok(());
+        }
+        if add {
+            self.add_tags_to_notes(&nids, tags).map(|_| ())?;
+        } else {
+            self.remove_tags_from_notes(&nids, tags).map(|_| ())?;
+        }
+        Ok(())
+    }
 }
 
 /// Outcome of [`Collection::import_merged_notes`].
@@ -155,8 +308,10 @@ mod test {
     fn two_note_collection() -> Result<Collection> {
         let mut col = Collection::new();
         let nt = col.get_notetype_by_name("Basic")?.unwrap();
-        for _ in 0..2 {
+        for word in ["alpha", "beta"] {
             let mut note = nt.new_note();
+            note.fields_mut()[0] = format!("q-{word}");
+            note.fields_mut()[1] = format!("a-{word}");
             col.add_note(&mut note, DeckId(1))?;
         }
         Ok(col)
@@ -241,5 +396,32 @@ mod test {
         assert_eq!(report.skipped[0].guid, "ghost");
         assert!(report.skipped[0].reason.contains("Ghost"));
         Ok(())
+    }
+
+    #[test]
+    fn browser_search_and_bulk() -> Result<()> {
+        let mut col = two_note_collection()?;
+        let rows = col.browser_cards_for_search("", 100)?;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| !row.preview.is_empty()));
+        let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+
+        col.suspend_cards(&ids[0..1], true)?;
+        col.tag_cards(&ids, "klepci", true)?;
+        let snaps = col.export_notes_for_search("")?;
+        assert!(snaps
+            .iter()
+            .all(|snap| snap.tags.contains(&"klepci".to_string())));
+
+        col.suspend_cards(&ids[0..1], false)?;
+        let removed = col.delete_cards(&ids[0..1])?;
+        assert_eq!(removed, 1);
+        assert_eq!(col.export_notes_for_search("")?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn html_to_text_basics() {
+        assert_eq!(html_to_text("<div>a<br>b&nbsp;&amp;</div>"), "a\nb &");
     }
 }

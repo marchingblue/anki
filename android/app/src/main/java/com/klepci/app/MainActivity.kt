@@ -52,14 +52,15 @@ fun KlepciApp() {
     Column(Modifier.fillMaxSize().background(Bg)) {
         error?.let { Text(it, color = Again, modifier = Modifier.padding(12.dp)) }
         TabRow(selectedTabIndex = tab) {
-            listOf("Decks", "Review", "Stats").forEachIndexed { i, title ->
+            listOf("Decks", "Review", "Browse", "Stats").forEachIndexed { i, title ->
                 Tab(selected = tab == i, onClick = { tab = i }, text = { Text(title) })
             }
         }
         when (tab) {
             0 -> Decks(core, { error = it }, { tab = 1 })
             1 -> Review(core, { error = it })
-            2 -> Stats(core, { error = it })
+            2 -> Browse(core, { error = it })
+            3 -> Stats(core, { error = it })
         }
     }
 }
@@ -150,6 +151,63 @@ fun Review(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
                             ) { Text(label) }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun Browse(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    var rows by remember { mutableStateOf(listOf<uniffi.klep_mobile.BrowserRow>()) }
+    var selected by remember { mutableStateOf(setOf<Long>()) }
+    var confirmDelete by remember { mutableStateOf(false) }
+
+    fun search() {
+        core?.let {
+            try {
+                rows = it.searchCards(query, 200u)
+                selected = emptySet()
+                confirmDelete = false
+            } catch (e: Exception) { onError(e.toString()) }
+        }
+    }
+    fun bulk(op: (List<Long>) -> Unit) {
+        val ids = selected.toList()
+        if (ids.isEmpty()) return
+        try { op(ids); search() } catch (e: Exception) { onError(e.toString()) }
+    }
+
+    Column(Modifier.fillMaxSize().padding(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(value = query, onValueChange = { query = it },
+                label = { Text("search") }, modifier = Modifier.weight(1f))
+            Button(onClick = ::search) { Text("Go") }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { selected = rows.map { it.id }.toSet() }) { Text("All") }
+            OutlinedButton(onClick = { core?.let { bulk { ids -> it.suspendCards(ids, true) } } }) { Text("Susp") }
+            OutlinedButton(onClick = { core?.let { bulk { ids -> it.suspendCards(ids, false) } } }) { Text("Uns") }
+            OutlinedButton(onClick = { core?.let { bulk { ids -> it.buryCards(ids) } } }) { Text("Bury") }
+            OutlinedButton(onClick = {
+                if (confirmDelete) core?.let { bulk { ids -> it.deleteCards(ids) } }
+                else confirmDelete = true
+            }) { Text(if (confirmDelete) "Sure?" else "Del") }
+        }
+        Text("${selected.size} selected", color = Color.Gray,
+            modifier = Modifier.padding(vertical = 6.dp))
+        LazyColumn {
+            items(rows) { row ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Checkbox(
+                        checked = row.id in selected,
+                        onCheckedChange = { on ->
+                            selected = if (on) selected + row.id else selected - row.id
+                        }
+                    )
+                    Text("[${row.deck}] ${row.preview}", fontSize = 14.sp)
                 }
             }
         }

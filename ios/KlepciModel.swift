@@ -47,4 +47,17 @@ final class KlepciModel: ObservableObject {
     func loadStats() {
         // parse try? core.timingJson(search: "", topN: 10)
     }
+
+    // Browse state (wired to searchCards/suspendCards/buryCards/deleteCards
+    // once klep_mobile.swift is integrated).
+    @Published var query = ""
+    @Published var rows: [(id: Int64, deck: String, preview: String)] = []
+    @Published var selected = Set<Int64>()
+    @Published var confirmDelete = false
+
+    func runSearch() {
+        // rows = (try? core.searchCards(query: query, limit: 200))?.map { ... } ?? []
+        selected = []
+        confirmDelete = false
+    }
 }

@@ -15,6 +15,9 @@ use anki::scheduler::answering::CardAnswer;
 use anki::scheduler::answering::Rating;
 use anki::scheduler::states::SchedulingStates;
 
+/// Canonical card-HTML to plain text, shared by the Rust frontends.
+pub use anki::klepci::html_to_text;
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +52,13 @@ pub struct AnswerView {
     pub id: i64,
     pub question: String,
     pub answer: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserRow {
+    pub id: i64,
+    pub deck: String,
+    pub preview: String,
 }
 
 pub struct Core {
@@ -201,6 +211,46 @@ impl Core {
         })
         .to_string())
     }
+
+    /// Browser rows for `search`, capped at `limit`.
+    pub fn search(&mut self, query: &str, limit: usize) -> Result<Vec<BrowserRow>, CoreError> {
+        Ok(self
+            .col
+            .browser_cards_for_search(query, limit)
+            .map_err(core_err)?
+            .into_iter()
+            .map(|row| BrowserRow {
+                id: row.id,
+                deck: row.deck,
+                preview: row.preview,
+            })
+            .collect())
+    }
+
+    /// Suspend (`suspend=true`) or unsuspend cards by id.
+    pub fn suspend(&mut self, ids: &[i64], suspend: bool) -> Result<(), CoreError> {
+        self.col.suspend_cards(ids, suspend).map_err(core_err)
+    }
+
+    /// Bury cards until tomorrow.
+    pub fn bury(&mut self, ids: &[i64]) -> Result<(), CoreError> {
+        self.col.bury_cards(ids).map_err(core_err)
+    }
+
+    /// Delete the notes behind the given cards. Returns notes removed.
+    pub fn delete_cards(&mut self, ids: &[i64]) -> Result<u32, CoreError> {
+        self.col.delete_cards(ids).map_err(core_err)
+    }
+
+    /// Move cards to another deck.
+    pub fn set_deck(&mut self, ids: &[i64], deck_id: i64) -> Result<(), CoreError> {
+        self.col.set_deck_for_cards(ids, deck_id).map_err(core_err)
+    }
+
+    /// Add (`add=true`) or remove a tag on the notes behind the cards.
+    pub fn tag(&mut self, ids: &[i64], tag: &str, add: bool) -> Result<(), CoreError> {
+        self.col.tag_cards(ids, tag, add).map_err(core_err)
+    }
 }
 
 #[cfg(test)]
@@ -272,5 +322,21 @@ mod test {
         let (mut core, _guard) = test_core("timing");
         let json = core.timing_json("", 5).unwrap();
         assert!(json.contains("\"reviews\":0"));
+    }
+
+    #[test]
+    fn browser_search_and_bulk() {
+        let (mut core, _guard) = test_core("browser");
+        add_basic_note(&mut core);
+        add_basic_note(&mut core);
+        let rows = core.search("", 100).unwrap();
+        assert_eq!(rows.len(), 2);
+        let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+        core.suspend(&ids[0..1], true).unwrap();
+        core.tag(&ids, "klepci", true).unwrap();
+        core.suspend(&ids[0..1], false).unwrap();
+        core.bury(&ids[1..2]).unwrap();
+        assert_eq!(core.delete_cards(&ids[0..1]).unwrap(), 1);
+        assert_eq!(core.search("", 100).unwrap().len(), 1);
     }
 }

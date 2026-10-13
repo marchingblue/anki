@@ -60,6 +60,54 @@ struct ReviewView: View {
     }
 }
 
+struct BrowseView: View {
+    @ObservedObject var model: KlepciModel
+
+    var body: some View {
+        VStack {
+            HStack {
+                TextField("search", text: $model.query)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { model.runSearch() }
+                Button("Go") { model.runSearch() }
+            }
+            .padding(.horizontal)
+            HStack {
+                Button("All") { model.selected = Set(model.rows.map(\.id)) }
+                Button("Susp") { /* try? core.suspendCards(ids: suspend: true) */ model.runSearch() }
+                Button("Uns") { /* try? core.suspendCards(ids: suspend: false) */ model.runSearch() }
+                Button("Bury") { /* try? core.buryCards(ids:) */ model.runSearch() }
+                Button(model.confirmDelete ? "Sure?" : "Del") {
+                    if model.confirmDelete {
+                        // try? core.deleteCards(ids:)
+                        model.runSearch()
+                    } else {
+                        model.confirmDelete = true
+                    }
+                }
+                Text("\(model.selected.count) sel").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.bordered)
+            .padding(.horizontal)
+            List(model.rows, id: \.id) { row in
+                HStack {
+                    Image(systemName: model.selected.contains(row.id) ? "checkmark.square" : "square")
+                    Text("[\(row.deck)] \(row.preview)").lineLimit(2)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if model.selected.contains(row.id) {
+                        model.selected.remove(row.id)
+                    } else {
+                        model.selected.insert(row.id)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Browse")
+    }
+}
+
 struct StatsView: View {
     @ObservedObject var model: KlepciModel
 

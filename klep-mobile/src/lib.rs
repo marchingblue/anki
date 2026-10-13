@@ -26,6 +26,13 @@ pub struct AnswerView {
     pub answer: String,
 }
 
+#[derive(uniffi::Record)]
+pub struct BrowserRow {
+    pub id: i64,
+    pub deck: String,
+    pub preview: String,
+}
+
 #[derive(Debug, uniffi::Error)]
 pub enum MobileError {
     Failed(String),
@@ -122,6 +129,56 @@ impl MobileCore {
             .lock()
             .map_err(|err| MobileError::Failed(err.to_string()))?;
         core.timing_json(&search, top_n).map_err(MobileError::from)
+    }
+
+    pub fn search_cards(&self, query: String, limit: u32) -> Result<Vec<BrowserRow>, MobileError> {
+        let mut core = self.lock_core()?;
+        Ok(core
+            .search(&query, limit as usize)
+            .map_err(MobileError::from)?
+            .into_iter()
+            .map(|row| BrowserRow {
+                id: row.id,
+                deck: row.deck,
+                preview: row.preview,
+            })
+            .collect())
+    }
+
+    pub fn suspend_cards(&self, ids: Vec<i64>, suspend: bool) -> Result<(), MobileError> {
+        self.lock_core()?
+            .suspend(&ids, suspend)
+            .map_err(MobileError::from)
+    }
+
+    pub fn bury_cards(&self, ids: Vec<i64>) -> Result<(), MobileError> {
+        self.lock_core()?.bury(&ids).map_err(MobileError::from)
+    }
+
+    pub fn delete_cards(&self, ids: Vec<i64>) -> Result<u32, MobileError> {
+        self.lock_core()?
+            .delete_cards(&ids)
+            .map_err(MobileError::from)
+    }
+
+    pub fn set_deck(&self, ids: Vec<i64>, deck_id: i64) -> Result<(), MobileError> {
+        self.lock_core()?
+            .set_deck(&ids, deck_id)
+            .map_err(MobileError::from)
+    }
+
+    pub fn tag_cards(&self, ids: Vec<i64>, tag: String, add: bool) -> Result<(), MobileError> {
+        self.lock_core()?
+            .tag(&ids, &tag, add)
+            .map_err(MobileError::from)
+    }
+}
+
+impl MobileCore {
+    fn lock_core(&self) -> Result<std::sync::MutexGuard<'_, klep_core::Core>, MobileError> {
+        self.inner
+            .lock()
+            .map_err(|err| MobileError::Failed(err.to_string()))
     }
 }
 

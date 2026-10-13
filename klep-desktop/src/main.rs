@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use eframe::egui;
+use klep_core::html_to_text;
 use klep_core::AnswerView;
 use klep_core::CardView;
 use klep_core::Core;
@@ -23,59 +24,11 @@ fn default_collection_path() -> PathBuf {
     dir.join("collection.anki2")
 }
 
-/// Card HTML to readable plain text. Images/audio become placeholders
-/// (media rendering is v1.1).
-fn html_to_text(html: &str) -> String {
-    let mut out = html
-        .replace("<br>", "\n")
-        .replace("<br/>", "\n")
-        .replace("<br />", "\n")
-        .replace("</p>", "\n")
-        .replace("</div>", "\n")
-        .replace("</li>", "\n")
-        .replace("<li>", "\n• ");
-    // [sound:name] -> placeholder
-    while let Some(start) = out.find("[sound:") {
-        let Some(end) = out[start..].find(']') else {
-            break;
-        };
-        out.replace_range(start..start + end + 1, "🔊");
-    }
-    // <img ...> -> placeholder
-    while let Some(start) = out.find("<img") {
-        let Some(end) = out[start..].find('>') else {
-            break;
-        };
-        out.replace_range(start..start + end + 1, "[image]");
-    }
-    // strip remaining tags
-    let mut text = String::with_capacity(out.len());
-    let mut inside = false;
-    for ch in out.chars() {
-        match ch {
-            '<' => inside = true,
-            '>' => inside = false,
-            _ if !inside => text.push(ch),
-            _ => {}
-        }
-    }
-    text.replace("&nbsp;", " ")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
-}
-
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Decks,
     Review,
+    Browse,
     Stats,
 }
 
@@ -94,6 +47,12 @@ struct KlepciApp {
     shown_at: Option<Instant>,
     done_message: Option<String>,
     stats: Option<serde_json::Value>,
+    query: String,
+    rows: Vec<klep_core::BrowserRow>,
+    selected: std::collections::HashSet<i64>,
+    tag_input: String,
+    move_deck: Option<i64>,
+    confirm_delete: bool,
 }
 
 impl KlepciApp {
@@ -108,6 +67,12 @@ impl KlepciApp {
             shown_at: None,
             done_message: None,
             stats: None,
+            query: String::new(),
+            rows: vec![],
+            selected: Default::default(),
+            tag_input: String::new(),
+            move_deck: None,
+            confirm_delete: false,
         };
         match Core::open(&default_collection_path()) {
             Ok(core) => {
@@ -204,13 +169,69 @@ impl KlepciApp {
     fn load_stats(&mut self) {
         let json = self.core.as_mut().map(|core| core.timing_json("", 10));
         match json {
-            Some(result) => self.stats = self.fail(result).and_then(|text| serde_json::from_str(&text).ok()),
+            Some(result) => {
+                self.stats = self
+                    .fail(result)
+                    .and_then(|text| serde_json::from_str(&text).ok())
+            }
             None => {
                 self.error = Some("no collection open".to_string());
                 self.stats = None;
             }
         }
     }
+
+    fn run_search(&mut self) {
+        let query = self.query.clone();
+        let rows = self.core.as_mut().map(|core| core.search(&query, 200));
+        match rows {
+            Some(result) => {
+                if let Some(rows) = self.fail(result) {
+                    self.selected.clear();
+                    self.confirm_delete = false;
+                    self.rows = rows;
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn selected_ids(&self) -> Vec<i64> {
+        let mut ids: Vec<i64> = self.selected.iter().copied().collect();
+        ids.sort();
+        ids
+    }
+
+    fn bulk(&mut self, op: BulkOp) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let result = self.core.as_mut().map(|core| match &op {
+            BulkOp::Suspend(on) => core.suspend(&ids, *on).map(|_| ()),
+            BulkOp::Bury => core.bury(&ids).map(|_| ()),
+            BulkOp::Delete => core.delete_cards(&ids).map(|_| ()),
+            BulkOp::Move(deck_id) => core.set_deck(&ids, *deck_id).map(|_| ()),
+            BulkOp::Tag(tag, add) => core.tag(&ids, tag, *add).map(|_| ()),
+        });
+        match result {
+            Some(result) => {
+                if self.fail(result).is_some() {
+                    self.confirm_delete = false;
+                    self.run_search();
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+}
+
+enum BulkOp {
+    Suspend(bool),
+    Bury,
+    Delete,
+    Move(i64),
+    Tag(String, bool),
 }
 
 impl eframe::App for KlepciApp {
@@ -245,6 +266,7 @@ impl eframe::App for KlepciApp {
                 for (tab, label) in [
                     (Tab::Decks, "Decks"),
                     (Tab::Review, "Review"),
+                    (Tab::Browse, "Browse"),
                     (Tab::Stats, "Stats"),
                 ] {
                     if ui.selectable_label(self.tab == tab, label).clicked() {
@@ -271,6 +293,7 @@ impl eframe::App for KlepciApp {
             match self.tab {
                 Tab::Decks => self.view_decks(ui),
                 Tab::Review => self.view_review(ui),
+                Tab::Browse => self.view_browse(ui),
                 Tab::Stats => self.view_stats(ui),
             }
         });
@@ -349,6 +372,104 @@ impl KlepciApp {
         }
     }
 
+    fn view_browse(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let search = ui.add_sized(
+                [ui.available_width() - 90.0, 28.0],
+                egui::TextEdit::singleline(&mut self.query)
+                    .hint_text("search, e.g. deck:Bio tag:exam"),
+            );
+            if ui
+                .add_sized([80.0, 28.0], egui::Button::new("Search"))
+                .clicked()
+                || search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+            {
+                self.run_search();
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(format!("{} selected", self.selected.len()));
+            if ui.small_button("all").clicked() {
+                self.selected = self.rows.iter().map(|row| row.id).collect();
+            }
+            if ui.small_button("none").clicked() {
+                self.selected.clear();
+            }
+            if ui.small_button("suspend").clicked() {
+                self.bulk(BulkOp::Suspend(true));
+            }
+            if ui.small_button("unsuspend").clicked() {
+                self.bulk(BulkOp::Suspend(false));
+            }
+            if ui.small_button("bury").clicked() {
+                self.bulk(BulkOp::Bury);
+            }
+        });
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("move_deck")
+                .selected_text(
+                    self.move_deck
+                        .and_then(|id| self.decks.iter().find(|deck| deck.id == id))
+                        .map_or("move to…".to_string(), |deck| deck.name.clone()),
+                )
+                .show_ui(ui, |ui| {
+                    for deck in self.decks.clone() {
+                        ui.selectable_value(&mut self.move_deck, Some(deck.id), &deck.name);
+                    }
+                });
+            if ui.small_button("move").clicked() {
+                if let Some(deck_id) = self.move_deck {
+                    self.bulk(BulkOp::Move(deck_id));
+                }
+            }
+            ui.add_sized(
+                [120.0, 22.0],
+                egui::TextEdit::singleline(&mut self.tag_input).hint_text("tag"),
+            );
+            if ui.small_button("+tag").clicked() {
+                let tag = self.tag_input.clone();
+                if !tag.is_empty() {
+                    self.bulk(BulkOp::Tag(tag, true));
+                }
+            }
+            if ui.small_button("−tag").clicked() {
+                let tag = self.tag_input.clone();
+                if !tag.is_empty() {
+                    self.bulk(BulkOp::Tag(tag, false));
+                }
+            }
+            let delete_label = if self.confirm_delete {
+                "confirm delete?"
+            } else {
+                "delete"
+            };
+            if ui.small_button(delete_label).clicked() {
+                if self.confirm_delete {
+                    self.bulk(BulkOp::Delete);
+                } else {
+                    self.confirm_delete = true;
+                }
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for row in self.rows.clone() {
+                let mut checked = self.selected.contains(&row.id);
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut checked, "").changed() {
+                        if checked {
+                            self.selected.insert(row.id);
+                        } else {
+                            self.selected.remove(&row.id);
+                        }
+                    }
+                    ui.label(format!("[{}] {}", row.deck, row.preview));
+                });
+            }
+        });
+    }
+
     fn view_stats(&mut self, ui: &mut egui::Ui) {
         let Some(stats) = self.stats.clone() else {
             ui.centered_and_justified(|ui| {
@@ -359,7 +480,9 @@ impl KlepciApp {
         let reviews = stats["reviews"].as_u64().unwrap_or(0);
         let mean = stats["mean_secs"].as_f64().unwrap_or(0.0);
         let total = stats["total_secs"].as_f64().unwrap_or(0.0);
-        ui.heading(format!("{reviews} reviews · mean {mean:.1}s · total {total:.0}s"));
+        ui.heading(format!(
+            "{reviews} reviews · mean {mean:.1}s · total {total:.0}s"
+        ));
         ui.add_space(8.0);
         ui.label("last 26 weeks");
         let days = stats["days"].as_array().cloned().unwrap_or_default();
@@ -372,8 +495,10 @@ impl KlepciApp {
             .max(1);
         let cell = 14.0;
         let weeks = recent.len().div_ceil(7).max(1);
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(weeks as f32 * cell, 7.0 * cell), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(weeks as f32 * cell, 7.0 * cell),
+            egui::Sense::hover(),
+        );
         for (i, day) in recent.iter().enumerate() {
             let count = day["reviews"].as_u64().unwrap_or(0);
             let t = (count as f32 / max as f32).clamp(0.0, 1.0);
@@ -446,7 +571,7 @@ fn main() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod test {
-    use super::html_to_text;
+    use klep_core::html_to_text;
 
     #[test]
     fn strips_tags_and_entities() {
@@ -458,6 +583,9 @@ mod test {
 
     #[test]
     fn placeholders_for_media() {
-        assert_eq!(html_to_text(r#"a<img src="x.jpg">b[sound:y.mp3]"#), "a[image]b🔊");
+        assert_eq!(
+            html_to_text(r#"a<img src="x.jpg">b[sound:y.mp3]"#),
+            "a[image]b🔊"
+        );
     }
 }

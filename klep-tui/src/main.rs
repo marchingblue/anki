@@ -15,7 +15,9 @@ use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
+use klep_core::html_to_text;
 use klep_core::AnswerView;
+use klep_core::BrowserRow;
 use klep_core::CardView;
 use klep_core::Core;
 use klep_core::DeckInfo;
@@ -44,55 +46,18 @@ fn default_collection_path() -> PathBuf {
     dir.join("collection.anki2")
 }
 
-fn html_to_text(html: &str) -> String {
-    let mut out = html
-        .replace("<br>", "\n")
-        .replace("<br/>", "\n")
-        .replace("<br />", "\n")
-        .replace("</p>", "\n")
-        .replace("</div>", "\n")
-        .replace("</li>", "\n")
-        .replace("<li>", "\n• ");
-    while let Some(start) = out.find("[sound:") {
-        let Some(end) = out[start..].find(']') else {
-            break;
-        };
-        out.replace_range(start..start + end + 1, "🔊");
-    }
-    while let Some(start) = out.find("<img") {
-        let Some(end) = out[start..].find('>') else {
-            break;
-        };
-        out.replace_range(start..start + end + 1, "[image]");
-    }
-    let mut text = String::with_capacity(out.len());
-    let mut inside = false;
-    for ch in out.chars() {
-        match ch {
-            '<' => inside = true,
-            '>' => inside = false,
-            _ if !inside => text.push(ch),
-            _ => {}
-        }
-    }
-    text.replace("&nbsp;", " ")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
-}
-
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Decks,
     Review,
+    Browse,
     Stats,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum EditTarget {
+    Search,
+    Tag,
 }
 
 struct App {
@@ -106,6 +71,14 @@ struct App {
     shown_at: Option<Instant>,
     done: bool,
     stats: Option<serde_json::Value>,
+    query: String,
+    editing: Option<EditTarget>,
+    tag_input: String,
+    rows: Vec<BrowserRow>,
+    row_state: ListState,
+    selected: std::collections::HashSet<i64>,
+    confirm_delete: bool,
+    move_deck_idx: usize,
 }
 
 impl App {
@@ -121,6 +94,14 @@ impl App {
             shown_at: None,
             done: false,
             stats: None,
+            query: String::new(),
+            editing: None,
+            tag_input: String::new(),
+            rows: vec![],
+            row_state: ListState::default(),
+            selected: Default::default(),
+            confirm_delete: false,
+            move_deck_idx: 0,
         };
         match Core::open(&default_collection_path()) {
             Ok(core) => {
@@ -216,6 +197,110 @@ impl App {
             None => None,
         };
     }
+
+    fn run_search(&mut self) {
+        let query = self.query.clone();
+        let rows = self.core.as_mut().map(|core| core.search(&query, 200));
+        match rows {
+            Some(result) => {
+                if let Some(rows) = self.fail(result) {
+                    self.rows = rows;
+                    self.selected.clear();
+                    self.confirm_delete = false;
+                    self.row_state
+                        .select(if self.rows.is_empty() { None } else { Some(0) });
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn selected_ids(&self) -> Vec<i64> {
+        let mut ids: Vec<i64> = self.selected.iter().copied().collect();
+        ids.sort();
+        ids
+    }
+
+    fn bulk_suspend(&mut self, suspend: bool) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let result = self
+            .core
+            .as_mut()
+            .map(|core| core.suspend(&ids, suspend).map(|_| ()));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.run_search();
+            }
+        }
+    }
+
+    fn bulk_bury(&mut self) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let result = self.core.as_mut().map(|core| core.bury(&ids).map(|_| ()));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.run_search();
+            }
+        }
+    }
+
+    fn bulk_delete(&mut self) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let result = self
+            .core
+            .as_mut()
+            .map(|core| core.delete_cards(&ids).map(|_| ()));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.confirm_delete = false;
+                self.run_search();
+            }
+        }
+    }
+
+    fn bulk_tag(&mut self, add: bool) {
+        let ids = self.selected_ids();
+        if ids.is_empty() || self.tag_input.is_empty() {
+            return;
+        }
+        let tag = self.tag_input.clone();
+        let result = self
+            .core
+            .as_mut()
+            .map(|core| core.tag(&ids, &tag, add).map(|_| ()));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.run_search();
+            }
+        }
+    }
+
+    fn bulk_move(&mut self) {
+        let ids = self.selected_ids();
+        if ids.is_empty() || self.decks.is_empty() {
+            return;
+        }
+        self.move_deck_idx %= self.decks.len();
+        let deck_id = self.decks[self.move_deck_idx].id;
+        let result = self
+            .core
+            .as_mut()
+            .map(|core| core.set_deck(&ids, deck_id).map(|_| ()));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.run_search();
+            }
+        }
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -232,25 +317,56 @@ fn main() -> io::Result<()> {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+            // text editing (search query / tag input) eats all keys first
+            if let Some(target) = app.editing {
+                match key.code {
+                    KeyCode::Esc => app.editing = None,
+                    KeyCode::Enter => {
+                        app.editing = None;
+                        match target {
+                            EditTarget::Search => app.run_search(),
+                            EditTarget::Tag => app.bulk_tag(true),
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        match target {
+                            EditTarget::Search => app.query.pop(),
+                            EditTarget::Tag => app.tag_input.pop(),
+                        };
+                    }
+                    KeyCode::Char(ch) => match target {
+                        EditTarget::Search => app.query.push(ch),
+                        EditTarget::Tag => app.tag_input.push(ch),
+                    },
+                    _ => {}
+                }
+                continue;
+            }
+            // (answer visible: digits rate instead of switching tabs, see below)
+            let rating_mode = app.tab == Tab::Review && app.answer.is_some();
             match key.code {
-                KeyCode::Char('q') => break,
-                KeyCode::Char('1') => {
+                KeyCode::Char('q') if !rating_mode => break,
+                KeyCode::Char('1') if !rating_mode => {
                     app.tab = Tab::Decks;
                 }
-                KeyCode::Char('2') => {
+                KeyCode::Char('2') if !rating_mode => {
                     app.tab = Tab::Review;
                     if app.card.is_none() {
                         app.next();
                     }
                 }
-                KeyCode::Char('3') => {
+                KeyCode::Char('3') if !rating_mode => {
+                    app.tab = Tab::Browse;
+                }
+                KeyCode::Char('4') if !rating_mode => {
                     app.tab = Tab::Stats;
                     app.load_stats();
                 }
                 KeyCode::Tab => {
                     app.tab = match app.tab {
                         Tab::Decks => Tab::Review,
-                        Tab::Review => Tab::Stats,
+                        Tab::Review => Tab::Browse,
+                        Tab::Browse => Tab::Stats,
                         Tab::Stats => Tab::Decks,
                     };
                     if app.tab == Tab::Review && app.card.is_none() {
@@ -266,11 +382,39 @@ fn main() -> io::Result<()> {
                     if app.tab == Tab::Decks {
                         app.tab = Tab::Review;
                         app.next();
-                    } else if app.answer.is_none() {
+                    } else if app.tab == Tab::Review && app.answer.is_none() {
                         app.show();
                     }
                 }
-                KeyCode::Char(' ') if app.tab == Tab::Review => app.show(),
+                KeyCode::Char(' ') => match app.tab {
+                    Tab::Review => app.show(),
+                    Tab::Browse => toggle_browse_selection(&mut app),
+                    _ => {}
+                },
+                KeyCode::Char('/') if app.tab == Tab::Browse => {
+                    app.editing = Some(EditTarget::Search);
+                }
+                KeyCode::Char('a') if app.tab == Tab::Browse => {
+                    app.selected = app.rows.iter().map(|row| row.id).collect();
+                }
+                KeyCode::Char('s') if app.tab == Tab::Browse => app.bulk_suspend(true),
+                KeyCode::Char('u') if app.tab == Tab::Browse => app.bulk_suspend(false),
+                KeyCode::Char('b') if app.tab == Tab::Browse => app.bulk_bury(),
+                KeyCode::Char('d') if app.tab == Tab::Browse => {
+                    if app.confirm_delete {
+                        app.bulk_delete();
+                    } else {
+                        app.confirm_delete = true;
+                    }
+                }
+                KeyCode::Char('t') if app.tab == Tab::Browse => {
+                    app.editing = Some(EditTarget::Tag);
+                }
+                KeyCode::Char('T') if app.tab == Tab::Browse => app.bulk_tag(false),
+                KeyCode::Char('m') if app.tab == Tab::Browse => app.bulk_move(),
+                KeyCode::Char('M') if app.tab == Tab::Browse && !app.decks.is_empty() => {
+                    app.move_deck_idx = (app.move_deck_idx + 1) % app.decks.len();
+                }
                 _ => {}
             }
             // number keys double as ratings once the answer is visible
@@ -282,8 +426,6 @@ fn main() -> io::Result<()> {
                     KeyCode::Char('4') => app.answer(4),
                     _ => {}
                 }
-            } else if app.tab != Tab::Review {
-                // 1/2/3 already handled as tab switches above; nothing more
             }
         }
     }
@@ -295,15 +437,31 @@ fn main() -> io::Result<()> {
 }
 
 fn move_selection(app: &mut App, delta: i32) {
-    if app.tab != Tab::Decks || app.decks.is_empty() {
-        return;
+    if app.tab == Tab::Decks && !app.decks.is_empty() {
+        let len = app.decks.len() as i32;
+        let next = app
+            .deck_state
+            .selected()
+            .map_or(0, |i| (i as i32 + delta).rem_euclid(len) as usize);
+        app.deck_state.select(Some(next));
+    } else if app.tab == Tab::Browse && !app.rows.is_empty() {
+        let len = app.rows.len() as i32;
+        let next = app
+            .row_state
+            .selected()
+            .map_or(0, |i| (i as i32 + delta).rem_euclid(len) as usize);
+        app.row_state.select(Some(next));
     }
-    let len = app.decks.len() as i32;
-    let next = app
-        .deck_state
-        .selected()
-        .map_or(0, |i| (i as i32 + delta).rem_euclid(len) as usize);
-    app.deck_state.select(Some(next));
+}
+
+fn toggle_browse_selection(app: &mut App) {
+    if let Some(idx) = app.row_state.selected() {
+        if let Some(row) = app.rows.get(idx) {
+            if !app.selected.remove(&row.id) {
+                app.selected.insert(row.id);
+            }
+        }
+    }
 }
 
 fn render(app: &mut App, frame: &mut ratatui::Frame) {
@@ -313,7 +471,7 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
         .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
 
-    let tabs = ["1 Decks", "2 Review", "3 Stats"];
+    let tabs = ["1 Decks", "2 Review", "3 Browse", "4 Stats"];
     let tab_line = Line::from(
         tabs.iter()
             .enumerate()
@@ -321,7 +479,8 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
                 let active = match app.tab {
                     Tab::Decks => i == 0,
                     Tab::Review => i == 1,
-                    Tab::Stats => i == 2,
+                    Tab::Browse => i == 2,
+                    Tab::Stats => i == 3,
                 };
                 Span::styled(
                     format!(" {title} "),
@@ -392,6 +551,64 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
                     .block(Block::default().borders(Borders::ALL).title("Review"))
                     .wrap(Wrap { trim: false }),
                 chunks[1],
+            );
+        }
+        Tab::Browse => {
+            let area = chunks[1];
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                    Constraint::Length(3),
+                ])
+                .split(area);
+            let query_line = match app.editing {
+                Some(EditTarget::Search) => format!("query: {}▌", app.query),
+                Some(EditTarget::Tag) => format!("tag: {}▌ (enter=add)", app.tag_input),
+                None => format!("query: {}  [/] edit", app.query),
+            };
+            frame.render_widget(
+                Paragraph::new(query_line)
+                    .block(Block::default().borders(Borders::ALL).title("Browse")),
+                layout[0],
+            );
+            let items: Vec<ListItem> = app
+                .rows
+                .iter()
+                .map(|row| {
+                    let mark = if app.selected.contains(&row.id) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    ListItem::new(format!("{mark} [{}] {}", row.deck, row.preview))
+                })
+                .collect();
+            frame.render_stateful_widget(
+                List::new(items)
+                    .block(Block::default().borders(Borders::ALL))
+                    .highlight_style(Style::default().bg(Color::DarkGray)),
+                layout[1],
+                &mut app.row_state,
+            );
+            let move_target = app
+                .decks
+                .get(app.move_deck_idx % app.decks.len().max(1))
+                .map_or("-".to_string(), |deck| deck.name.clone());
+            let delete_hint = if app.confirm_delete {
+                "[d] CONFIRM delete"
+            } else {
+                "[d] delete"
+            };
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} sel · [space] sel [a] all [s] susp [u] unsusp [b] bury {} [t] tag [T] untag [m] move→{} [M] target",
+                    app.selected.len(),
+                    delete_hint,
+                    move_target,
+                )),
+                layout[2],
             );
         }
         Tab::Stats => {

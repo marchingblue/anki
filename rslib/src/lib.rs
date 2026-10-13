@@ -22,7 +22,7 @@ pub mod findreplace;
 pub mod i18n;
 pub mod image_occlusion;
 pub mod import_export;
-mod klepci;
+pub mod klepci;
 pub mod latex;
 pub mod links;
 pub mod log;
