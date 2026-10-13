@@ -10,9 +10,12 @@
 //!
 //! v0.1: pure data + merge. Git transport (`gix`) lands in v0.2.
 
+pub mod git;
 pub mod merge;
 pub mod ops;
 pub mod snapshot;
 
+pub use git::{commit_snapshot, commit_tree, head_id, log, merge_base_hex, open_or_init};
+pub use git::{Author, LogEntry, SnapshotRepo};
 pub use merge::{merge_notes, Conflict, ConflictKind, MergeResult, Side};
 pub use ops::{apply_op, NoteOp, NoteSnapshot};
