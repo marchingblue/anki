@@ -263,16 +263,72 @@ mod test {
     fn rows() -> Vec<RevlogRow> {
         vec![
             // card 1: fast, 3 reviews (10s, 20s, 30s)
-            RevlogRow { card_id: 1, deck_id: 7, timestamp_secs: 86_400 * 10 + 5, kind: REVIEW, button_chosen: 3, ease_factor: 250, taken_millis: 10_000 },
-            RevlogRow { card_id: 1, deck_id: 7, timestamp_secs: 86_400 * 11, kind: REVIEW, button_chosen: 3, ease_factor: 250, taken_millis: 20_000 },
-            RevlogRow { card_id: 1, deck_id: 7, timestamp_secs: 86_400 * 11 + 9, kind: LEARNING, button_chosen: 1, ease_factor: 0, taken_millis: 30_000 },
+            RevlogRow {
+                card_id: 1,
+                deck_id: 7,
+                timestamp_secs: 86_400 * 10 + 5,
+                kind: REVIEW,
+                button_chosen: 3,
+                ease_factor: 250,
+                taken_millis: 10_000,
+            },
+            RevlogRow {
+                card_id: 1,
+                deck_id: 7,
+                timestamp_secs: 86_400 * 11,
+                kind: REVIEW,
+                button_chosen: 3,
+                ease_factor: 250,
+                taken_millis: 20_000,
+            },
+            RevlogRow {
+                card_id: 1,
+                deck_id: 7,
+                timestamp_secs: 86_400 * 11 + 9,
+                kind: LEARNING,
+                button_chosen: 1,
+                ease_factor: 0,
+                taken_millis: 30_000,
+            },
             // card 2: slow, 2 reviews (100s, 200s)
-            RevlogRow { card_id: 2, deck_id: 7, timestamp_secs: 86_400 * 10, kind: REVIEW, button_chosen: 2, ease_factor: 200, taken_millis: 100_000 },
-            RevlogRow { card_id: 2, deck_id: 7, timestamp_secs: 86_400 * 12, kind: REVIEW, button_chosen: 4, ease_factor: 300, taken_millis: 200_000 },
+            RevlogRow {
+                card_id: 2,
+                deck_id: 7,
+                timestamp_secs: 86_400 * 10,
+                kind: REVIEW,
+                button_chosen: 2,
+                ease_factor: 200,
+                taken_millis: 100_000,
+            },
+            RevlogRow {
+                card_id: 2,
+                deck_id: 7,
+                timestamp_secs: 86_400 * 12,
+                kind: REVIEW,
+                button_chosen: 4,
+                ease_factor: 300,
+                taken_millis: 200_000,
+            },
             // excluded: manual reschedule (no rating)
-            RevlogRow { card_id: 2, deck_id: 7, timestamp_secs: 86_400 * 12, kind: MANUAL, button_chosen: 0, ease_factor: 250, taken_millis: 0 },
+            RevlogRow {
+                card_id: 2,
+                deck_id: 7,
+                timestamp_secs: 86_400 * 12,
+                kind: MANUAL,
+                button_chosen: 0,
+                ease_factor: 250,
+                taken_millis: 0,
+            },
             // excluded: cramming (filtered, ease 0)
-            RevlogRow { card_id: 1, deck_id: 7, timestamp_secs: 86_400 * 12, kind: FILTERED, button_chosen: 3, ease_factor: 0, taken_millis: 5_000 },
+            RevlogRow {
+                card_id: 1,
+                deck_id: 7,
+                timestamp_secs: 86_400 * 12,
+                kind: FILTERED,
+                button_chosen: 3,
+                ease_factor: 0,
+                taken_millis: 5_000,
+            },
         ]
     }
 
