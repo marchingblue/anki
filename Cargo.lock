@@ -3746,6 +3746,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "klep-core"
+version = "0.1.0"
+dependencies = [
+ "anki",
+ "serde_json",
+]
+
+[[package]]
 name = "klepci-stats"
 version = "0.1.0"
 dependencies = [

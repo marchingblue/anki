@@ -11,6 +11,7 @@ members = [
   "build/ninja_gen",
   "build/runner",
   "ftl",
+  "klep-core",
   "klepci-stats",
   "klepci-sync",
   "pylib/rsbridge",

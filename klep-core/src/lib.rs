@@ -1,0 +1,274 @@
+// Copyright: klepci contributors
+// License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
+
+//! Minimalist safe facade over an Anki collection for klepci frontends.
+//!
+//! Deliberately small: open/close, deck list, review loop (next/show/answer),
+//! timing stats as JSON. Everything else lives in `anki`, `klepci-stats`
+//! and `klepci-sync`. All frontends (desktop, mobile, TUI) talk to this.
+
+use std::fmt::Display;
+use std::path::Path;
+
+use anki::prelude::*;
+use anki::scheduler::answering::CardAnswer;
+use anki::scheduler::answering::Rating;
+use anki::scheduler::states::SchedulingStates;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreError(pub String);
+
+impl Display for CoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CoreError {}
+
+fn core_err<E: Display>(err: E) -> CoreError {
+    CoreError(err.to_string())
+}
+
+#[derive(Debug, Clone)]
+pub struct DeckInfo {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CardView {
+    pub id: i64,
+    pub question: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnswerView {
+    pub id: i64,
+    pub question: String,
+    pub answer: String,
+}
+
+pub struct Core {
+    col: anki::collection::Collection,
+    shown: Option<(i64, SchedulingStates)>,
+}
+
+impl Core {
+    /// Open (or create) the collection at `path`.
+    pub fn open(path: &Path) -> Result<Self, CoreError> {
+        Ok(Core {
+            col: anki::collection::CollectionBuilder::new(path)
+                .build()
+                .map_err(core_err)?,
+            shown: None,
+        })
+    }
+
+    pub fn close(self) -> Result<(), CoreError> {
+        self.col.close(None).map_err(core_err)
+    }
+
+    /// All decks, including the default one.
+    pub fn decks(&self) -> Result<Vec<DeckInfo>, CoreError> {
+        Ok(self
+            .col
+            .get_all_deck_names(false)
+            .map_err(core_err)?
+            .into_iter()
+            .map(|(id, name)| DeckInfo { id: id.0, name })
+            .collect())
+    }
+
+    /// Next due card across the whole collection, with rendered question.
+    /// Remembers the scheduling states so [`Core::answer`] is safe.
+    pub fn next_card(&mut self) -> Result<Option<CardView>, CoreError> {
+        match self.col.get_next_card().map_err(core_err)? {
+            None => Ok(None),
+            Some(queued) => {
+                let id = queued.card.id().0;
+                let rendered = self
+                    .col
+                    .render_existing_card(queued.card.id(), false, false)
+                    .map_err(core_err)?;
+                self.shown = Some((id, queued.states));
+                Ok(Some(CardView {
+                    id,
+                    question: rendered.question().into_owned(),
+                }))
+            }
+        }
+    }
+
+    /// Render question + answer for a card (usually the one just shown).
+    pub fn show_answer(&mut self, card_id: i64) -> Result<AnswerView, CoreError> {
+        let rendered = self
+            .col
+            .render_existing_card(CardId(card_id), false, false)
+            .map_err(core_err)?;
+        Ok(AnswerView {
+            id: card_id,
+            question: rendered.question().into_owned(),
+            answer: rendered.answer().into_owned(),
+        })
+    }
+
+    /// Answer the last shown card. `rating`: 1=again 2=hard 3=good 4=easy.
+    /// Refuses cards that were not shown (stale scheduling states are a
+    /// data-corruption vector).
+    pub fn answer(&mut self, card_id: i64, rating: u8, secs_taken: u32) -> Result<(), CoreError> {
+        let (shown_id, states) = self.shown.clone().ok_or_else(|| {
+            CoreError("no card shown; call next_card() before answer()".to_string())
+        })?;
+        if shown_id != card_id {
+            return Err(CoreError(format!(
+                "stale card: shown {shown_id}, answered {card_id}"
+            )));
+        }
+        let (rating, new_state) = match rating {
+            1 => (Rating::Again, states.again.clone()),
+            2 => (Rating::Hard, states.hard.clone()),
+            3 => (Rating::Good, states.good.clone()),
+            4 => (Rating::Easy, states.easy.clone()),
+            other => return Err(CoreError(format!("rating must be 1-4, got {other}"))),
+        };
+        let mut answer = CardAnswer {
+            card_id: CardId(card_id),
+            current_state: states.current.clone(),
+            new_state,
+            rating,
+            answered_at: TimestampMillis::now(),
+            milliseconds_taken: secs_taken.saturating_mul(1000),
+            custom_data: None,
+            from_queue: true,
+        };
+        self.col.answer_card(&mut answer).map_err(core_err)?;
+        self.shown = None;
+        Ok(())
+    }
+
+    /// Timing stats for `search` as compact JSON (heatmap, slowest cards,
+    /// deck-relative outliers). For agents and stats screens.
+    pub fn timing_json(&mut self, search: &str, top_n: u32) -> Result<String, CoreError> {
+        let resp = self
+            .col
+            .timing_stats_for_search(search, top_n)
+            .map_err(core_err)?;
+        let slowest: Vec<_> = resp
+            .slowest
+            .iter()
+            .map(|card| {
+                serde_json::json!({
+                    "card_id": card.card_id,
+                    "reviews": card.reviews,
+                    "mean_secs": card.mean_secs,
+                    "max_secs": card.max_secs,
+                })
+            })
+            .collect();
+        let outliers: Vec<_> = resp
+            .outliers
+            .iter()
+            .map(|card| {
+                serde_json::json!({
+                    "card_id": card.card_id,
+                    "mean_secs": card.mean_secs,
+                    "z_vs_deck": card.z_vs_deck,
+                })
+            })
+            .collect();
+        let days: Vec<_> = resp
+            .days
+            .iter()
+            .map(|day| {
+                serde_json::json!({
+                    "day": day.day,
+                    "reviews": day.reviews,
+                    "total_secs": day.total_secs,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "reviews": resp.reviews,
+            "total_secs": resp.total_secs,
+            "mean_secs": resp.mean_secs,
+            "std_secs": resp.std_secs,
+            "slowest": slowest,
+            "outliers": outliers,
+            "days": days,
+        })
+        .to_string())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn test_core(name: &str) -> (Core, tempfile_guard::Guard) {
+        let dir = std::env::temp_dir().join(format!(
+            "klep-core-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = Core::open(&dir.join("test.anki2")).unwrap();
+        (core, tempfile_guard::Guard(dir))
+    }
+
+    mod tempfile_guard {
+        use std::path::PathBuf;
+        pub struct Guard(pub PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    fn add_basic_note(core: &mut Core) {
+        let nt = core
+            .col
+            .get_notetype_by_name("Basic")
+            .unwrap()
+            .expect("stock Basic notetype");
+        let mut note = nt.new_note();
+        core.col.add_note(&mut note, DeckId(1)).unwrap();
+    }
+
+    #[test]
+    fn decks_lists_default() {
+        let (core, _guard) = test_core("decks");
+        let decks = core.decks().unwrap();
+        assert!(decks.iter().any(|deck| deck.id == 1));
+    }
+
+    #[test]
+    fn review_loop_next_show_answer() {
+        let (mut core, _guard) = test_core("review");
+        add_basic_note(&mut core);
+        let card = core.next_card().unwrap().expect("one due card");
+        assert!(!card.question.is_empty());
+        let both = core.show_answer(card.id).unwrap();
+        assert!(!both.answer.is_empty());
+        core.answer(card.id, 3, 5).unwrap();
+        // answering twice without re-showing is refused
+        assert!(core.answer(card.id, 3, 5).is_err());
+    }
+
+    #[test]
+    fn answer_rejects_unknown_card() {
+        let (mut core, _guard) = test_core("reject");
+        assert!(core.answer(123, 3, 1).is_err());
+        assert!(core.answer(123, 9, 1).is_err());
+    }
+
+    #[test]
+    fn timing_json_empty_collection() {
+        let (mut core, _guard) = test_core("timing");
+        let json = core.timing_json("", 5).unwrap();
+        assert!(json.contains("\"reviews\":0"));
+    }
+}

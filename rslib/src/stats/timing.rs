@@ -12,7 +12,9 @@ use crate::prelude::*;
 use crate::search::SortMode;
 
 impl Collection {
-    pub(crate) fn timing_stats_for_search(
+    /// Deck/scope-wide answer-timing stats. Public klepci API (the
+    /// collection format is untouched; this only reads revlogs).
+    pub fn timing_stats_for_search(
         &mut self,
         search: &str,
         top_n: u32,
