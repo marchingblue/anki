@@ -17,7 +17,8 @@ use crate::search::SortMode;
 
 impl Collection {
     /// Export notes matching `search` as guid-keyed snapshots, sorted by guid.
-    pub(crate) fn export_notes_for_search(&mut self, search: &str) -> Result<Vec<NoteSnapshot>> {
+    /// Public klepci API (read-only; the collection format is untouched).
+    pub fn export_notes_for_search(&mut self, search: &str) -> Result<Vec<NoteSnapshot>> {
         let guard = self.search_cards_into_table(search, SortMode::NoOrder)?;
         let col = &mut *guard.col;
         let note_ids: BTreeSet<NoteId> = col
@@ -49,7 +50,8 @@ impl Collection {
     /// Apply a merged snapshot set. Existing notes keep their cards and
     /// decks; only fields/tags change. New notes land in `target_deck`.
     /// Schema drift (field count, notetype) is reported, never forced.
-    pub(crate) fn import_merged_notes(
+    /// Public klepci API.
+    pub fn import_merged_notes(
         &mut self,
         target_deck: DeckId,
         merged: &[NoteSnapshot],

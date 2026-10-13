@@ -15,6 +15,8 @@ use anki::scheduler::answering::CardAnswer;
 use anki::scheduler::answering::Rating;
 use anki::scheduler::states::SchedulingStates;
 
+use serde::Serialize;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreError(pub String);
 
@@ -30,19 +32,19 @@ fn core_err<E: Display>(err: E) -> CoreError {
     CoreError(err.to_string())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DeckInfo {
     pub id: i64,
     pub name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CardView {
     pub id: i64,
     pub question: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AnswerView {
     pub id: i64,
     pub question: String,
@@ -126,15 +128,15 @@ impl Core {
             )));
         }
         let (rating, new_state) = match rating {
-            1 => (Rating::Again, states.again.clone()),
-            2 => (Rating::Hard, states.hard.clone()),
-            3 => (Rating::Good, states.good.clone()),
-            4 => (Rating::Easy, states.easy.clone()),
+            1 => (Rating::Again, states.again),
+            2 => (Rating::Hard, states.hard),
+            3 => (Rating::Good, states.good),
+            4 => (Rating::Easy, states.easy),
             other => return Err(CoreError(format!("rating must be 1-4, got {other}"))),
         };
         let mut answer = CardAnswer {
             card_id: CardId(card_id),
-            current_state: states.current.clone(),
+            current_state: states.current,
             new_state,
             rating,
             answered_at: TimestampMillis::now(),

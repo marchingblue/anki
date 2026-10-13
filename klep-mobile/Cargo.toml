@@ -1,0 +1,13 @@
+[package]
+name = "klep-mobile"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "UniFFI bindings of klep-core for Android (Kotlin) and iOS (Swift)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+klep-core = { path = "../klep-core" }
+uniffi = { version = "0.32", features = ["build"] }
