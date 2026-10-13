@@ -1,0 +1,15 @@
+[package]
+name = "klepci-stats"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Polars-powered timing statistics over Anki revlog data for klepci"
+
+# Detached from the anki workspace until the baseline builds green;
+# then this table goes away and the crate is added to workspace members.
+[workspace]
+
+[dependencies]
+polars = { version = "0.55", features = ["lazy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
