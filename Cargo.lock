@@ -100,6 +100,7 @@ dependencies = [
  "inflections",
  "itertools 0.14.0",
  "klepci-stats",
+ "klepci-sync",
  "nom",
  "num_cpus",
  "num_enum",
