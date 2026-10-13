@@ -16,6 +16,7 @@ service StatsService {
   rpc Graphs(GraphsRequest) returns (GraphsResponse);
   rpc GetGraphPreferences(generic.Empty) returns (GraphPreferences);
   rpc SetGraphPreferences(GraphPreferences) returns (generic.Empty);
+  rpc TimingStats(TimingStatsRequest) returns (TimingStatsResponse);
 }
 
 // Implicitly includes any of the above methods that are not listed in the
@@ -74,6 +75,41 @@ message CardStatsResponse {
 message GraphsRequest {
   string search = 1;
   uint32 days = 2;
+}
+
+message TimingStatsRequest {
+  // Standard Anki search; empty = whole collection.
+  string search = 1;
+  // How many slowest/outlier cards to return; 0 = default 20, max 200.
+  uint32 top_n = 2;
+}
+
+message TimingStatsResponse {
+  message CardTiming {
+    int64 card_id = 1;
+    uint32 reviews = 2;
+    float total_secs = 3;
+    float mean_secs = 4;
+    float median_secs = 5;
+    float std_secs = 6;
+    float min_secs = 7;
+    float max_secs = 8;
+    // mean_secs scored against the searched scope
+    float z_vs_deck = 9;
+  }
+  message DayBucket {
+    // Days since Unix epoch (UTC).
+    int64 day = 1;
+    uint32 reviews = 2;
+    float total_secs = 3;
+  }
+  uint32 reviews = 1;
+  float total_secs = 2;
+  float mean_secs = 3;
+  float std_secs = 4;
+  repeated CardTiming slowest = 5;
+  repeated CardTiming outliers = 6;
+  repeated DayBucket days = 7;
 }
 
 message GraphsResponse {

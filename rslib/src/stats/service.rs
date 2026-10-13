@@ -26,6 +26,13 @@ impl crate::services::StatsService for Collection {
         self.graph_data_for_search(&input.search, input.days)
     }
 
+    fn timing_stats(
+        &mut self,
+        input: anki_proto::stats::TimingStatsRequest,
+    ) -> error::Result<anki_proto::stats::TimingStatsResponse> {
+        self.timing_stats_for_search(&input.search, input.top_n)
+    }
+
     fn get_graph_preferences(&mut self) -> error::Result<anki_proto::stats::GraphPreferences> {
         Ok(Collection::get_graph_preferences(self))
     }

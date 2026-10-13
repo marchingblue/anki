@@ -4,6 +4,7 @@
 mod card;
 mod graphs;
 mod service;
+mod timing;
 mod today;
 
 pub use today::studied_today;

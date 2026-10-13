@@ -11,6 +11,7 @@ members = [
   "build/ninja_gen",
   "build/runner",
   "ftl",
+  "klepci-stats",
   "pylib/rsbridge",
   "rslib",
   "rslib/i18n",
@@ -39,6 +40,7 @@ version = "6.6.2"
 [workspace.dependencies]
 # local
 anki = { path = "rslib" }
+klepci-stats = { path = "klepci-stats" }
 anki_i18n = { path = "rslib/i18n" }
 anki_io = { path = "rslib/io" }
 anki_process = { path = "rslib/process" }
