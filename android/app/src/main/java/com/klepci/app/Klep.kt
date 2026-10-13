@@ -15,7 +15,7 @@ object Klep {
         return synchronized(this) {
             core?.let { return it }
             System.loadLibrary("klep_mobile")
-            val fresh = uniffi.klep_mobile.MobileCore(
+            val fresh = uniffi.klep_mobile.MobileCore.open(
                 File(filesDir, "collection.anki2").absolutePath
             )
             core = fresh

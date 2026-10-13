@@ -18,7 +18,7 @@ final class KlepciModel: ObservableObject {
 
     init() {
         // let path = documents/collection.anki2
-        // self.core = try! MobileCore(path: path)
+        // self.core = try! MobileCore.open(path: path)
         refreshDecks()
     }
 
