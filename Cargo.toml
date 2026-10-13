@@ -12,6 +12,7 @@ members = [
   "build/runner",
   "ftl",
   "klepci-stats",
+  "klepci-sync",
   "pylib/rsbridge",
   "rslib",
   "rslib/i18n",
