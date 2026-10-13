@@ -366,7 +366,7 @@ mod test {
             "theirs",
             &author(),
             &tree,
-            &[base.clone()],
+            std::slice::from_ref(&base),
         )
         .unwrap();
         // restore HEAD content: no new commit expected
