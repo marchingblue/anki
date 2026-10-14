@@ -301,6 +301,82 @@ impl App {
             }
         }
     }
+
+    /// Edit the current review card in `$EDITOR`. Returns an error string
+    /// for display, if anything failed.
+    fn edit_in_editor(&mut self) -> Option<String> {
+        let card_id = self.card.as_ref()?.id;
+        let core = self.core.as_mut()?;
+        let data = core
+            .edit_data(card_id)
+            .map_err(|err| err.to_string())
+            .ok()?;
+        let path = std::env::temp_dir().join(format!("klepci-edit-{}.txt", data.note_id));
+        let template = render_edit_template(
+            &data.notetype_name,
+            "",
+            &data.tags,
+            &data.field_names,
+            &data.fields,
+        );
+        if let Err(err) = std::fs::write(&path, template) {
+            return Some(err.to_string());
+        }
+        if let Err(err) = run_editor(&path) {
+            return Some(err);
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| err.to_string())
+            .ok()?;
+        let _ = std::fs::remove_file(&path);
+        let (fields, tags, _, _) = parse_edit_template(&text, &data.field_names).ok()?;
+        core.save_note(data.note_id, fields, &tags)
+            .map_err(|err| err.to_string())
+            .err()
+    }
+
+    /// Add a note via `$EDITOR` (same template, empty fields).
+    fn add_in_editor(&mut self) -> Option<String> {
+        let core = self.core.as_mut()?;
+        let notetypes = core.notetype_names().map_err(|err| err.to_string()).ok()?;
+        let fallback = "Basic".to_string();
+        let notetype = notetypes.first().unwrap_or(&fallback);
+        let field_names = core
+            .field_names(notetype)
+            .map_err(|err| err.to_string())
+            .ok()?;
+        let empty = vec![String::new(); field_names.len()];
+        let path = std::env::temp_dir().join(format!(
+            "klepci-add-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |time| time.as_nanos())
+        ));
+        let template = render_edit_template(notetype, "Default", "", &field_names, &empty);
+        if let Err(err) = std::fs::write(&path, template) {
+            return Some(err.to_string());
+        }
+        if let Err(err) = run_editor(&path) {
+            return Some(err);
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| err.to_string())
+            .ok()?;
+        let _ = std::fs::remove_file(&path);
+        let (fields, tags, _notetype, deck_name) = parse_edit_template(&text, &field_names).ok()?;
+        if fields.iter().all(|field| field.trim().is_empty()) {
+            return Some("empty note, not added".to_string());
+        }
+        let deck_id = self
+            .decks
+            .iter()
+            .find(|deck| deck.name == deck_name)
+            .map(|deck| deck.id)
+            .unwrap_or(1);
+        core.add_note(notetype, deck_id, fields, &tags)
+            .map_err(|err| err.to_string())
+            .err()
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -391,6 +467,15 @@ fn main() -> io::Result<()> {
                     Tab::Browse => toggle_browse_selection(&mut app),
                     _ => {}
                 },
+                KeyCode::Char('E') if app.tab == Tab::Review => match app.edit_in_editor() {
+                    Some(err) => app.error = Some(err),
+                    None => app.show(),
+                },
+                KeyCode::Char('A') if app.tab == Tab::Review => {
+                    if let Some(err) = app.add_in_editor() {
+                        app.error = Some(err);
+                    }
+                }
                 KeyCode::Char('/') if app.tab == Tab::Browse => {
                     app.editing = Some(EditTarget::Search);
                 }
@@ -436,6 +521,24 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+/// Leave the TUI, run `$EDITOR` (or vi) on `path`, come back.
+fn run_editor(path: &std::path::Path) -> Result<(), String> {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    disable_raw_mode().map_err(|err| err.to_string())?;
+    execute!(io::stdout(), LeaveAlternateScreen).map_err(|err| err.to_string())?;
+    let status = std::process::Command::new(&editor)
+        .arg(path)
+        .status()
+        .map_err(|err| format!("cannot run {editor}: {err}"))?;
+    enable_raw_mode().map_err(|err| err.to_string())?;
+    execute!(io::stdout(), EnterAlternateScreen).map_err(|err| err.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{editor} exited with {status}"))
+    }
+}
+
 fn move_selection(app: &mut App, delta: i32) {
     if app.tab == Tab::Decks && !app.decks.is_empty() {
         let len = app.decks.len() as i32;
@@ -462,6 +565,72 @@ fn toggle_browse_selection(app: &mut App) {
             }
         }
     }
+}
+
+/// Edit-template format: `# key: value` headers, then `=== Field ===`
+/// sections in field order. Round-tested below.
+fn render_edit_template(
+    notetype: &str,
+    deck: &str,
+    tags: &str,
+    field_names: &[String],
+    fields: &[String],
+) -> String {
+    let mut out = String::from("# klepci note — lines starting with # are ignored\n");
+    out.push_str(&format!(
+        "# notetype: {notetype}\n# deck: {deck}\n# tags: {tags}\n"
+    ));
+    for (name, field) in field_names.iter().zip(fields.iter()) {
+        out.push_str(&format!("=== {name} ===\n{field}\n"));
+    }
+    out
+}
+
+fn parse_edit_template(
+    text: &str,
+    field_names: &[String],
+) -> Result<(Vec<String>, String, String, String), String> {
+    let mut notetype = String::new();
+    let mut deck = String::new();
+    let mut tags = String::new();
+    let mut fields: Vec<String> = Vec::new();
+    let mut current: Option<usize> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# notetype:") {
+            notetype = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("# deck:") {
+            deck = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("# tags:") {
+            tags = rest.trim().to_string();
+        } else if line.starts_with("#") {
+            continue;
+        } else if line.starts_with("===") && line.ends_with("===") {
+            let name = line.trim_matches('=').trim();
+            match field_names.iter().position(|known| known == name) {
+                Some(idx) => {
+                    if fields.len() != idx {
+                        return Err(format!("fields out of order at {name}"));
+                    }
+                    fields.push(String::new());
+                    current = Some(idx);
+                }
+                None => return Err(format!("unknown field {name}")),
+            }
+        } else if let Some(idx) = current {
+            if !fields[idx].is_empty() {
+                fields[idx].push('\n');
+            }
+            fields[idx].push_str(line);
+        }
+    }
+    if fields.len() != field_names.len() {
+        return Err(format!(
+            "expected {} fields, found {}",
+            field_names.len(),
+            fields.len()
+        ));
+    }
+    Ok((fields, tags, notetype, deck))
 }
 
 fn render(app: &mut App, frame: &mut ratatui::Frame) {
@@ -546,6 +715,7 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
             if app.answer.is_some() {
                 text.push_str("\n\n[1] again  [2] hard  [3] good  [4] easy");
             }
+            text.push_str("\n[E] edit in $EDITOR  [A] add note");
             frame.render_widget(
                 Paragraph::new(text)
                     .block(Block::default().borders(Borders::ALL).title("Review"))
@@ -672,5 +842,29 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
                 chunks[1],
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{parse_edit_template, render_edit_template};
+
+    #[test]
+    fn template_roundtrip() {
+        let names = vec!["Front".to_string(), "Back".to_string()];
+        let fields = vec!["q\nmulti".to_string(), "a".to_string()];
+        let text = render_edit_template("Basic", "Default", "t1 t2", &names, &fields);
+        let (back_fields, tags, notetype, deck) = parse_edit_template(&text, &names).unwrap();
+        assert_eq!(back_fields, fields);
+        assert_eq!(tags, "t1 t2");
+        assert_eq!(notetype, "Basic");
+        assert_eq!(deck, "Default");
+    }
+
+    #[test]
+    fn template_rejects_drift() {
+        let names = vec!["Front".to_string(), "Back".to_string()];
+        assert!(parse_edit_template("=== Front ===\nx\n", &names).is_err());
+        assert!(parse_edit_template("=== Nope ===\nx\n=== Back ===\ny\n", &names).is_err());
     }
 }

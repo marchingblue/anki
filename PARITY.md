@@ -35,12 +35,13 @@ Legend: ✅ done · 🚧 in progress · ❌ not started · ➖ intentionally dif
 
 | Capability | Status | Notes |
 |---|---|---|
-| Edit fields (plain) | ❌ | after browser |
+| Edit fields (plain) | ✅ | desktop form, TUI via `$EDITOR`, mobile native fields |
+| Add note (type/deck/fields/tags) | ✅ | same coverage all frontends |
 | Rich text (bold/italic/color) | ❌ | stored as HTML, render as-is |
 | Cloze button | ❌ | text insertion, no preview magic |
 | MathJax render | ❌ | webviews only; TUI shows source |
 | Attach image/audio | ❌ | with media work |
-| Notetype / deck pickers | ❌ | |
+| Notetype / deck pickers | ✅ | dropdowns/lists on all frontends |
 | Template editor | ❌ | later; low frequency |
 | Image occlusion | ❌ | later; specialized flow |
 

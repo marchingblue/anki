@@ -61,6 +61,15 @@ pub struct BrowserRow {
     pub preview: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct EditorData {
+    pub note_id: i64,
+    pub notetype_name: String,
+    pub field_names: Vec<String>,
+    pub fields: Vec<String>,
+    pub tags: String,
+}
+
 pub struct Core {
     col: anki::collection::Collection,
     shown: Option<(i64, SchedulingStates)>,
@@ -251,6 +260,57 @@ impl Core {
     pub fn tag(&mut self, ids: &[i64], tag: &str, add: bool) -> Result<(), CoreError> {
         self.col.tag_cards(ids, tag, add).map_err(core_err)
     }
+
+    /// All notetype names, sorted.
+    pub fn notetype_names(&mut self) -> Result<Vec<String>, CoreError> {
+        self.col.notetype_names().map_err(core_err)
+    }
+
+    /// Field names of a notetype, in order.
+    pub fn field_names(&mut self, notetype: &str) -> Result<Vec<String>, CoreError> {
+        self.col
+            .field_names_for_notetype(notetype)
+            .map_err(core_err)
+    }
+
+    /// Load a card's note for editing.
+    pub fn edit_data(&mut self, card_id: i64) -> Result<EditorData, CoreError> {
+        self.col
+            .note_editor_data(card_id)
+            .map_err(core_err)
+            .map(|data| EditorData {
+                note_id: data.note_id,
+                notetype_name: data.notetype_name,
+                field_names: data.field_names,
+                fields: data.fields,
+                tags: data.tags,
+            })
+    }
+
+    /// Save edited fields + tags (space-separated).
+    pub fn save_note(
+        &mut self,
+        note_id: i64,
+        fields: Vec<String>,
+        tags: &str,
+    ) -> Result<(), CoreError> {
+        self.col
+            .update_note_fields(note_id, fields, tags)
+            .map_err(core_err)
+    }
+
+    /// Add a new note. Returns its id.
+    pub fn add_note(
+        &mut self,
+        notetype: &str,
+        deck_id: i64,
+        fields: Vec<String>,
+        tags: &str,
+    ) -> Result<i64, CoreError> {
+        self.col
+            .add_note_to_deck(notetype, deck_id, fields, tags)
+            .map_err(core_err)
+    }
 }
 
 #[cfg(test)]
@@ -338,5 +398,32 @@ mod test {
         core.bury(&ids[1..2]).unwrap();
         assert_eq!(core.delete_cards(&ids[0..1]).unwrap(), 1);
         assert_eq!(core.search("", 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn editor_and_add() {
+        let (mut core, _guard) = test_core("editor");
+        add_basic_note(&mut core);
+        let rows = core.search("", 100).unwrap();
+        let data = core.edit_data(rows[0].id).unwrap();
+        assert_eq!(data.notetype_name, "Basic");
+        assert_eq!(data.field_names.len(), 2);
+        core.save_note(
+            data.note_id,
+            vec!["Q".to_string(), "A".to_string()],
+            "t1 t2",
+        )
+        .unwrap();
+        let data = core.edit_data(rows[0].id).unwrap();
+        assert_eq!(data.fields[0], "Q");
+        assert_eq!(data.tags, "t1 t2");
+        let nid = core
+            .add_note("Basic", 1, vec!["nq".to_string(), "na".to_string()], "")
+            .unwrap();
+        assert!(nid > 0);
+        assert!(core
+            .notetype_names()
+            .unwrap()
+            .contains(&"Basic".to_string()));
     }
 }

@@ -48,6 +48,35 @@ final class KlepciModel: ObservableObject {
         // parse try? core.timingJson(search: "", topN: 10)
     }
 
+    // Editor state (wired to editData/saveNote/addNote/notetypeNames/
+    // fieldNames once klep_mobile.swift is integrated).
+    @Published var editingNote: Int64? = nil
+    @Published var editFields: [String] = []
+    @Published var editNames: [String] = []
+    @Published var editTags = ""
+    @Published var addNotetype = ""
+    @Published var addDeck = ""
+    @Published var addFields: [String] = []
+    @Published var addNames: [String] = []
+    @Published var addTags = ""
+    @Published var addStatus = ""
+
+    func startEdit(cardId: Int64) {
+        // let data = try? core.editData(cardId: cardId)
+        // editingNote = data?.noteId; editFields = data?.fields ?? [] ...
+        _ = cardId
+    }
+
+    func saveEdit() {
+        // try? core.saveNote(noteId: editingNote!, fields: editFields, tags: editTags)
+        editingNote = nil
+    }
+
+    func saveAdd() {
+        // let id = try? core.addNote(...)
+        // addStatus = "added #\(id)"; clear fields
+    }
+
     // Browse state (wired to searchCards/suspendCards/buryCards/deleteCards
     // once klep_mobile.swift is integrated).
     @Published var query = ""

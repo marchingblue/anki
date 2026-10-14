@@ -26,8 +26,10 @@ struct ContentView: View {
                 .tabItem { Label("Review", systemImage: "brain") }.tag(1)
             BrowseView(model: model)
                 .tabItem { Label("Browse", systemImage: "magnifyingglass") }.tag(2)
+            AddView(model: model)
+                .tabItem { Label("Add", systemImage: "plus") }.tag(3)
             StatsView(model: model)
-                .tabItem { Label("Stats", systemImage: "chart.bar") }.tag(3)
+                .tabItem { Label("Stats", systemImage: "chart.bar") }.tag(4)
         }
         .alert("Error", isPresented: Binding(
             get: { model.error != nil },

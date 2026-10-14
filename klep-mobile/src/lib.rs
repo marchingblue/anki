@@ -33,6 +33,15 @@ pub struct BrowserRow {
     pub preview: String,
 }
 
+#[derive(uniffi::Record)]
+pub struct EditorData {
+    pub note_id: i64,
+    pub notetype_name: String,
+    pub field_names: Vec<String>,
+    pub fields: Vec<String>,
+    pub tags: String,
+}
+
 #[derive(Debug, uniffi::Error)]
 pub enum MobileError {
     Failed(String),
@@ -170,6 +179,54 @@ impl MobileCore {
     pub fn tag_cards(&self, ids: Vec<i64>, tag: String, add: bool) -> Result<(), MobileError> {
         self.lock_core()?
             .tag(&ids, &tag, add)
+            .map_err(MobileError::from)
+    }
+
+    pub fn notetype_names(&self) -> Result<Vec<String>, MobileError> {
+        self.lock_core()?
+            .notetype_names()
+            .map_err(MobileError::from)
+    }
+
+    pub fn field_names(&self, notetype: String) -> Result<Vec<String>, MobileError> {
+        self.lock_core()?
+            .field_names(&notetype)
+            .map_err(MobileError::from)
+    }
+
+    pub fn edit_data(&self, card_id: i64) -> Result<EditorData, MobileError> {
+        self.lock_core()?
+            .edit_data(card_id)
+            .map_err(MobileError::from)
+            .map(|data| EditorData {
+                note_id: data.note_id,
+                notetype_name: data.notetype_name,
+                field_names: data.field_names,
+                fields: data.fields,
+                tags: data.tags,
+            })
+    }
+
+    pub fn save_note(
+        &self,
+        note_id: i64,
+        fields: Vec<String>,
+        tags: String,
+    ) -> Result<(), MobileError> {
+        self.lock_core()?
+            .save_note(note_id, fields, &tags)
+            .map_err(MobileError::from)
+    }
+
+    pub fn add_note(
+        &self,
+        notetype: String,
+        deck_id: i64,
+        fields: Vec<String>,
+        tags: String,
+    ) -> Result<i64, MobileError> {
+        self.lock_core()?
+            .add_note(&notetype, deck_id, fields, &tags)
             .map_err(MobileError::from)
     }
 }

@@ -72,6 +72,16 @@ pub struct BrowserRow {
     pub preview: String,
 }
 
+/// Data for the note editor. Public klepci API.
+#[derive(Debug, Clone)]
+pub struct EditorData {
+    pub note_id: i64,
+    pub notetype_name: String,
+    pub field_names: Vec<String>,
+    pub fields: Vec<String>,
+    pub tags: String,
+}
+
 impl Collection {
     /// Export notes matching `search` as guid-keyed snapshots, sorted by guid.
     /// Public klepci API (read-only; the collection format is untouched).
@@ -284,6 +294,95 @@ impl Collection {
         }
         Ok(())
     }
+
+    /// All notetype names, sorted.
+    pub fn notetype_names(&mut self) -> Result<Vec<String>> {
+        let mut names: Vec<String> = self
+            .get_all_notetypes()?
+            .iter()
+            .map(|nt| nt.name.clone())
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Field names of a notetype, in order.
+    pub fn field_names_for_notetype(&mut self, notetype_name: &str) -> Result<Vec<String>> {
+        let nt = self
+            .get_notetype_by_name(notetype_name)?
+            .or_not_found(notetype_name)?;
+        Ok(nt.fields.iter().map(|field| field.name.clone()).collect())
+    }
+
+    /// Load a card's note for editing.
+    pub fn note_editor_data(&mut self, cid: i64) -> Result<EditorData> {
+        let card = self
+            .storage
+            .get_card(CardId(cid))?
+            .or_not_found(CardId(cid))?;
+        let note = self
+            .storage
+            .get_note(card.note_id)?
+            .or_not_found(card.note_id)?;
+        let nt = self
+            .get_notetype(note.notetype_id)?
+            .or_not_found(note.notetype_id)?;
+        Ok(EditorData {
+            note_id: note.id.0,
+            notetype_name: nt.name.clone(),
+            field_names: nt.fields.iter().map(|field| field.name.clone()).collect(),
+            fields: note.fields().clone(),
+            tags: note.tags.join(" "),
+        })
+    }
+
+    /// Save edited fields + tags (space-separated). Field count must match.
+    pub fn update_note_fields(
+        &mut self,
+        note_id: i64,
+        fields: Vec<String>,
+        tags: &str,
+    ) -> Result<()> {
+        let mut note = self
+            .storage
+            .get_note(NoteId(note_id))?
+            .or_not_found(NoteId(note_id))?;
+        if note.fields().len() != fields.len() {
+            return None.or_invalid(format!(
+                "field count {} != {}",
+                note.fields().len(),
+                fields.len()
+            ));
+        }
+        *note.fields_mut() = fields;
+        note.tags = tags.split_whitespace().map(str::to_string).collect();
+        self.update_note(&mut note).map(|_| ())
+    }
+
+    /// Add a new note. Returns its id.
+    pub fn add_note_to_deck(
+        &mut self,
+        notetype_name: &str,
+        deck_id: i64,
+        fields: Vec<String>,
+        tags: &str,
+    ) -> Result<i64> {
+        let nt = self
+            .get_notetype_by_name(notetype_name)?
+            .or_not_found(notetype_name)?;
+        let mut note = nt.new_note();
+        if note.fields().len() != fields.len() {
+            return None.or_invalid(format!(
+                "field count {} != {}",
+                note.fields().len(),
+                fields.len()
+            ));
+        }
+        *note.fields_mut() = fields;
+        note.tags = tags.split_whitespace().map(str::to_string).collect();
+        self.add_note(&mut note, DeckId(deck_id)).map(|_| ())?;
+        Ok(note.id.0)
+    }
 }
 
 /// Outcome of [`Collection::import_merged_notes`].
@@ -423,5 +522,36 @@ mod test {
     #[test]
     fn html_to_text_basics() {
         assert_eq!(html_to_text("<div>a<br>b&nbsp;&amp;</div>"), "a\nb &");
+    }
+
+    #[test]
+    fn editor_load_save_and_add() -> Result<()> {
+        let mut col = two_note_collection()?;
+        assert!(col.notetype_names()?.contains(&"Basic".to_string()));
+        assert_eq!(
+            col.field_names_for_notetype("Basic")?,
+            vec!["Front".to_string(), "Back".to_string()]
+        );
+
+        let rows = col.browser_cards_for_search("q-alpha", 10)?;
+        assert_eq!(rows.len(), 1);
+        let data = col.note_editor_data(rows[0].id)?;
+        assert_eq!(data.notetype_name, "Basic");
+        assert_eq!(data.fields[0], "q-alpha");
+
+        col.update_note_fields(
+            data.note_id,
+            vec!["Q!".to_string(), "A!".to_string()],
+            "x y",
+        )?;
+        let data = col.note_editor_data(rows[0].id)?;
+        assert_eq!(data.fields, vec!["Q!".to_string(), "A!".to_string()]);
+        assert_eq!(data.tags, "x y");
+
+        let nid =
+            col.add_note_to_deck("Basic", 1, vec!["nq".to_string(), "na".to_string()], "new")?;
+        assert!(nid > 0);
+        assert_eq!(col.browser_cards_for_search("nq", 10)?.len(), 1);
+        Ok(())
     }
 }

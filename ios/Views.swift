@@ -57,6 +57,35 @@ struct ReviewView: View {
         }
         .navigationTitle("Review")
         .onAppear { if model.card == nil { model.next() } }
+        .toolbar {
+            if model.card != nil {
+                Button("Edit") {
+                    if let id = model.card?.id { model.startEdit(cardId: id) }
+                }
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { model.editingNote != nil },
+            set: { if !$0 { model.editingNote = nil } }
+        )) {
+            NavigationStack {
+                Form {
+                    ForEach(model.editNames.indices, id: \.self) { i in
+                        TextField(model.editNames[i], text: $model.editFields[i], axis: .vertical)
+                    }
+                    TextField("tags", text: $model.editTags)
+                }
+                .navigationTitle("Edit note")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { model.editingNote = nil }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") { model.saveEdit() }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -105,6 +134,26 @@ struct BrowseView: View {
             }
         }
         .navigationTitle("Browse")
+    }
+}
+
+struct AddView: View {
+    @ObservedObject var model: KlepciModel
+
+    var body: some View {
+        Form {
+            TextField("Notetype", text: $model.addNotetype)
+            TextField("Deck", text: $model.addDeck)
+            ForEach(model.addNames.indices, id: \.self) { i in
+                TextField(model.addNames[i], text: $model.addFields[i], axis: .vertical)
+            }
+            TextField("tags", text: $model.addTags)
+            Button("Add note") { model.saveAdd() }
+            if !model.addStatus.isEmpty {
+                Text(model.addStatus).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Add")
     }
 }
 

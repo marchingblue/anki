@@ -52,7 +52,7 @@ fun KlepciApp() {
     Column(Modifier.fillMaxSize().background(Bg)) {
         error?.let { Text(it, color = Again, modifier = Modifier.padding(12.dp)) }
         TabRow(selectedTabIndex = tab) {
-            listOf("Decks", "Review", "Browse", "Stats").forEachIndexed { i, title ->
+            listOf("Decks", "Review", "Browse", "Add", "Stats").forEachIndexed { i, title ->
                 Tab(selected = tab == i, onClick = { tab = i }, text = { Text(title) })
             }
         }
@@ -60,7 +60,8 @@ fun KlepciApp() {
             0 -> Decks(core, { error = it }, { tab = 1 })
             1 -> Review(core, { error = it })
             2 -> Browse(core, { error = it })
-            3 -> Stats(core, { error = it })
+            3 -> Add(core, { error = it })
+            4 -> Stats(core, { error = it })
         }
     }
 }
@@ -95,6 +96,7 @@ fun Review(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
     var answer by remember { mutableStateOf<uniffi.klep_mobile.AnswerView?>(null) }
     var done by remember { mutableStateOf(false) }
     var shownAt by remember { mutableStateOf(0L) }
+    var editState by remember { mutableStateOf<EditBuf?>(null) }
 
     fun next() {
         answer = null
@@ -124,6 +126,17 @@ fun Review(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
                         modifier = Modifier.padding(20.dp), fontSize = 19.sp)
                 }
                 Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = {
+                        try {
+                            editState = core?.editData(card!!.id)?.let {
+                                EditBuf(it.noteId, it.fieldNames, it.fields.toMutableList(), it.tags)
+                            }
+                        } catch (e: Exception) { onError(e.toString()) }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Edit note") }
+                Spacer(Modifier.height(8.dp))
                 if (answer == null) {
                     Button(onClick = {
                         try {
@@ -133,8 +146,7 @@ fun Review(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
                         Text("Show answer")
                     }
                 } else {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(Triple(1u, "Again", Again), Triple(2u, "Hard", Hard),
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {                        listOf(Triple(1u, "Again", Again), Triple(2u, "Hard", Hard),
                             Triple(3u, "Good", Good), Triple(4u, "Easy", Accent)
                         ).forEach { (rating, label, color) ->
                             OutlinedButton(
@@ -155,7 +167,55 @@ fun Review(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
             }
         }
     }
+    editState?.let { edit ->
+        AlertDialog(
+            onDismissRequest = { editState = null },
+            title = { Text("Edit note") },
+            text = {
+                LazyColumn {
+                    items(edit.fields.size) { i ->
+                        OutlinedTextField(
+                            value = edit.fields[i],
+                            onValueChange = {
+                                editState = edit.copy(
+                                    fields = edit.fields.toMutableList().also { list -> list[i] = it })
+                            },
+                            label = { Text(edit.names.getOrElse(i) { "field $i" }) },
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                        )
+                    }
+                    item {
+                        OutlinedTextField(
+                            value = edit.tags,
+                            onValueChange = { editState = edit.copy(tags = it) },
+                            label = { Text("tags") },
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        core?.saveNote(edit.noteId, edit.fields, edit.tags)
+                        editState = null
+                        answer = core?.showAnswer(card!!.id)
+                    } catch (e: Exception) { onError(e.toString()) }
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editState = null }) { Text("Cancel") }
+            }
+        )
+    }
 }
+
+data class EditBuf(
+    val noteId: Long,
+    val names: List<String>,
+    val fields: List<String>,
+    val tags: String,
+)
 
 @Composable
 fun Browse(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
@@ -209,6 +269,92 @@ fun Browse(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
                     )
                     Text("[${row.deck}] ${row.preview}", fontSize = 14.sp)
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun Add(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
+    var notetypes by remember { mutableStateOf(listOf<String>()) }
+    var decks by remember { mutableStateOf(listOf<uniffi.klep_mobile.DeckInfo>()) }
+    var notetype by remember { mutableStateOf<String?>(null) }
+    var deckId by remember { mutableStateOf<Long?>(null) }
+    var fieldNames by remember { mutableStateOf(listOf<String>()) }
+    var fields by remember { mutableStateOf(listOf<String>()) }
+    var tags by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf("") }
+    var ntOpen by remember { mutableStateOf(false) }
+    var deckOpen by remember { mutableStateOf(false) }
+
+    LaunchedEffect(core) {
+        core?.let {
+            try {
+                notetypes = it.notetypeNames()
+                decks = it.decks()
+            } catch (e: Exception) { onError(e.toString()) }
+        }
+    }
+
+    LazyColumn(Modifier.fillMaxSize().padding(16.dp)) {
+        item {
+            ExposedDropdownMenuBox(expanded = ntOpen, onExpandedChange = { ntOpen = it }) {
+                OutlinedTextField(value = notetype ?: "", onValueChange = {},
+                    readOnly = true, label = { Text("Notetype") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(ntOpen) },
+                    modifier = Modifier.fillMaxWidth().menuAnchor())
+                ExposedDropdownMenu(expanded = ntOpen, onDismissRequest = { ntOpen = false }) {
+                    notetypes.forEach { name ->
+                        DropdownMenuItem(text = { Text(name) }, onClick = {
+                            notetype = name
+                            ntOpen = false
+                            try {
+                                fieldNames = core?.fieldNames(name) ?: emptyList()
+                                fields = List(fieldNames.size) { "" }
+                            } catch (e: Exception) { onError(e.toString()) }
+                        })
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            ExposedDropdownMenuBox(expanded = deckOpen, onExpandedChange = { deckOpen = it }) {
+                OutlinedTextField(
+                    value = decks.find { it.id == deckId }?.name ?: "",
+                    onValueChange = {}, readOnly = true, label = { Text("Deck") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(deckOpen) },
+                    modifier = Modifier.fillMaxWidth().menuAnchor())
+                ExposedDropdownMenu(expanded = deckOpen, onDismissRequest = { deckOpen = false }) {
+                    decks.forEach { deck ->
+                        DropdownMenuItem(text = { Text(deck.name) }, onClick = {
+                            deckId = deck.id
+                            deckOpen = false
+                        })
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        items(fields.size) { i ->
+            OutlinedTextField(value = fields[i],
+                onValueChange = { fields = fields.toMutableList().also { list -> list[i] = it } },
+                label = { Text(fieldNames.getOrElse(i) { "field $i" }) },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
+        }
+        if (fieldNames.isNotEmpty()) {
+            item {
+                OutlinedTextField(value = tags, onValueChange = { tags = it },
+                    label = { Text("tags") }, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = {
+                    try {
+                        val id = core?.addNote(notetype!!, deckId!!, fields, tags)
+                        status = "added note #$id"
+                        fields = List(fields.size) { "" }
+                        tags = ""
+                    } catch (e: Exception) { onError(e.toString()) }
+                }, modifier = Modifier.fillMaxWidth()) { Text("Add note") }
+                if (status.isNotEmpty()) Text(status, color = Color.Gray)
             }
         }
     }

@@ -29,11 +29,13 @@ enum Tab {
     Decks,
     Review,
     Browse,
+    Add,
     Stats,
 }
 
 enum KeyAction {
     Show,
+    Edit,
     Answer(u8),
 }
 
@@ -53,6 +55,22 @@ struct KlepciApp {
     tag_input: String,
     move_deck: Option<i64>,
     confirm_delete: bool,
+    editing: Option<EditBuf>,
+    add_notetype: Option<String>,
+    add_notetypes: Vec<String>,
+    add_field_names: Vec<String>,
+    add_deck: Option<i64>,
+    add_fields: Vec<String>,
+    add_tags: String,
+    add_status: Option<String>,
+}
+
+#[derive(Clone)]
+struct EditBuf {
+    note_id: i64,
+    field_names: Vec<String>,
+    fields: Vec<String>,
+    tags: String,
 }
 
 impl KlepciApp {
@@ -73,6 +91,14 @@ impl KlepciApp {
             tag_input: String::new(),
             move_deck: None,
             confirm_delete: false,
+            editing: None,
+            add_notetype: None,
+            add_notetypes: vec![],
+            add_field_names: vec![],
+            add_deck: None,
+            add_fields: vec![],
+            add_tags: String::new(),
+            add_status: None,
         };
         match Core::open(&default_collection_path()) {
             Ok(core) => {
@@ -166,6 +192,100 @@ impl KlepciApp {
         }
     }
 
+    fn start_edit(&mut self) {
+        let card_id = match &self.card {
+            Some(card) => card.id,
+            None => return,
+        };
+        let data = self.core.as_mut().map(|core| core.edit_data(card_id));
+        match data {
+            Some(result) => {
+                if let Some(data) = self.fail(result) {
+                    self.editing = Some(EditBuf {
+                        note_id: data.note_id,
+                        field_names: data.field_names,
+                        fields: data.fields,
+                        tags: data.tags,
+                    });
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn save_edit(&mut self) {
+        let Some(edit) = self.editing.clone() else {
+            return;
+        };
+        let result = self
+            .core
+            .as_mut()
+            .map(|core| core.save_note(edit.note_id, edit.fields.clone(), &edit.tags));
+        match result {
+            Some(result) => {
+                if self.fail(result).is_some() {
+                    self.editing = None;
+                    self.show();
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn enter_add(&mut self) {
+        let names = self.core.as_mut().map(|core| core.notetype_names());
+        match names {
+            Some(result) => {
+                if let Some(names) = self.fail(result) {
+                    self.add_notetypes = names;
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn refresh_add_fields(&mut self) {
+        let notetype = match self.add_notetype.clone() {
+            Some(notetype) => notetype,
+            None => return,
+        };
+        let names = self.core.as_mut().map(|core| core.field_names(&notetype));
+        match names {
+            Some(result) => {
+                if let Some(field_names) = self.fail(result) {
+                    self.add_fields = vec![String::new(); field_names.len()];
+                    self.add_field_names = field_names;
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn save_add(&mut self) {
+        let (Some(notetype), Some(deck_id)) = (self.add_notetype.clone(), self.add_deck) else {
+            self.error = Some("pick a notetype and a deck first".to_string());
+            return;
+        };
+        let fields = self.add_fields.clone();
+        let tags = self.add_tags.clone();
+        let result = self
+            .core
+            .as_mut()
+            .map(|core| core.add_note(&notetype, deck_id, fields, &tags));
+        match result {
+            Some(result) => {
+                if let Some(id) = self.fail(result) {
+                    self.add_status = Some(format!("added note #{id}"));
+                    for field in &mut self.add_fields {
+                        field.clear();
+                    }
+                    self.add_tags.clear();
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
     fn load_stats(&mut self) {
         let json = self.core.as_mut().map(|core| core.timing_json("", 10));
         match json {
@@ -243,6 +363,9 @@ impl eframe::App for KlepciApp {
                 if input.key_pressed(egui::Key::Space) && self.answer.is_none() {
                     key_action = Some(KeyAction::Show);
                 }
+                if input.key_pressed(egui::Key::E) {
+                    key_action = Some(KeyAction::Edit);
+                }
                 for (key, rating) in [
                     (egui::Key::Num1, 1),
                     (egui::Key::Num2, 2),
@@ -257,6 +380,7 @@ impl eframe::App for KlepciApp {
         }
         match key_action {
             Some(KeyAction::Show) => self.show(),
+            Some(KeyAction::Edit) => self.start_edit(),
             Some(KeyAction::Answer(rating)) => self.answer(rating),
             None => {}
         }
@@ -267,12 +391,16 @@ impl eframe::App for KlepciApp {
                     (Tab::Decks, "Decks"),
                     (Tab::Review, "Review"),
                     (Tab::Browse, "Browse"),
+                    (Tab::Add, "Add"),
                     (Tab::Stats, "Stats"),
                 ] {
                     if ui.selectable_label(self.tab == tab, label).clicked() {
                         self.tab = tab;
                         if tab == Tab::Review && self.card.is_none() {
                             self.next();
+                        }
+                        if tab == Tab::Add {
+                            self.enter_add();
                         }
                         if tab == Tab::Stats {
                             self.load_stats();
@@ -294,6 +422,7 @@ impl eframe::App for KlepciApp {
                 Tab::Decks => self.view_decks(ui),
                 Tab::Review => self.view_review(ui),
                 Tab::Browse => self.view_browse(ui),
+                Tab::Add => self.view_add(ui),
                 Tab::Stats => self.view_stats(ui),
             }
         });
@@ -322,6 +451,10 @@ impl KlepciApp {
     }
 
     fn view_review(&mut self, ui: &mut egui::Ui) {
+        if self.editing.is_some() {
+            self.view_edit(ui);
+            return;
+        }
         if let Some(done) = &self.done_message.clone() {
             ui.centered_and_justified(|ui| {
                 ui.heading(done);
@@ -354,6 +487,10 @@ impl KlepciApp {
                 .clicked()
             {
                 self.show();
+            }
+            ui.add_space(6.0);
+            if ui.small_button("Edit note (E)").clicked() {
+                self.start_edit();
             }
         } else {
             ui.horizontal(|ui| {
@@ -468,6 +605,100 @@ impl KlepciApp {
                 });
             }
         });
+    }
+
+    fn view_edit(&mut self, ui: &mut egui::Ui) {
+        let mut save = false;
+        let mut cancel = false;
+        if let Some(edit) = self.editing.as_mut() {
+            ui.label(format!("editing note #{}", edit.note_id));
+            for (name, field) in edit.field_names.clone().iter().zip(edit.fields.iter_mut()) {
+                ui.label(name);
+                ui.add_sized(
+                    [ui.available_width(), 72.0],
+                    egui::TextEdit::multiline(field),
+                );
+            }
+            ui.label("tags");
+            ui.add_sized(
+                [ui.available_width(), 28.0],
+                egui::TextEdit::singleline(&mut edit.tags),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    save = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        }
+        if save {
+            self.save_edit();
+        }
+        if cancel {
+            self.editing = None;
+        }
+    }
+
+    fn view_add(&mut self, ui: &mut egui::Ui) {
+        if self.decks.is_empty() {
+            self.refresh_decks();
+        }
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("add_notetype")
+                .selected_text(
+                    self.add_notetype
+                        .clone()
+                        .unwrap_or_else(|| "type…".to_string()),
+                )
+                .show_ui(ui, |ui| {
+                    for name in self.add_notetypes.clone() {
+                        if ui
+                            .selectable_value(&mut self.add_notetype, Some(name.clone()), &name)
+                            .clicked()
+                        {
+                            self.refresh_add_fields();
+                        }
+                    }
+                });
+            egui::ComboBox::from_id_salt("add_deck")
+                .selected_text(
+                    self.add_deck
+                        .and_then(|id| self.decks.iter().find(|deck| deck.id == id))
+                        .map_or("deck…".to_string(), |deck| deck.name.clone()),
+                )
+                .show_ui(ui, |ui| {
+                    for deck in self.decks.clone() {
+                        ui.selectable_value(&mut self.add_deck, Some(deck.id), &deck.name);
+                    }
+                });
+        });
+        for (name, field) in self
+            .add_field_names
+            .clone()
+            .iter()
+            .zip(self.add_fields.iter_mut())
+        {
+            ui.label(name);
+            ui.add_sized(
+                [ui.available_width(), 72.0],
+                egui::TextEdit::multiline(field),
+            );
+        }
+        if !self.add_field_names.is_empty() {
+            ui.label("tags");
+            ui.add_sized(
+                [ui.available_width(), 28.0],
+                egui::TextEdit::singleline(&mut self.add_tags),
+            );
+            if ui.button("Add note").clicked() {
+                self.save_add();
+            }
+        }
+        if let Some(status) = &self.add_status.clone() {
+            ui.label(status);
+        }
     }
 
     fn view_stats(&mut self, ui: &mut egui::Ui) {
