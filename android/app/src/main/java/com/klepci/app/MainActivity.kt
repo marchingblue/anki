@@ -2,9 +2,13 @@ package com.klepci.app
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -15,6 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.io.File
 import org.json.JSONObject
 
 private val Bg = Color(0xFF16181D)
@@ -68,25 +73,149 @@ fun KlepciApp() {
 
 @Composable
 fun Decks(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit, goReview: () -> Unit) {
-    var decks by remember { mutableStateOf(listOf<uniffi.klep_mobile.DeckInfo>()) }
-    LaunchedEffect(core) {
+    var decks by remember { mutableStateOf(listOf<uniffi.klep_mobile.DeckCounts>()) }
+    var editName by remember { mutableStateOf<String?>(null) }
+    var renameId by remember { mutableStateOf<Long?>(null) }
+    var confirmDelete by remember { mutableStateOf<Long?>(null) }
+    var status by remember { mutableStateOf("") }
+
+    fun refresh() {
         core?.let {
-            try { decks = it.decks() } catch (e: Exception) { onError(e.toString()) }
+            try { decks = it.deckOverview() } catch (e: Exception) { onError(e.toString()) }
         }
     }
-    if (decks.isEmpty()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
-            Text("no decks yet", color = Color.Gray)
+    LaunchedEffect(core) { refresh() }
+
+    val context = LocalContext.current
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val tmp = File(context.cacheDir, "klepci-import.apkg")
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    tmp.outputStream().use { output -> input.copyTo(output) }
+                }
+                val count = core?.importApkg(tmp.absolutePath)
+                status = "imported $count new notes"
+                refresh()
+            } catch (e: Exception) { onError(e.toString()) }
         }
-        return
     }
-    LazyColumn(Modifier.padding(12.dp)) {
-        items(decks) { deck ->
-            Card(Modifier.fillMaxWidth().padding(vertical = 5.dp)
-                .clickable { goReview() }) {
-                Text(deck.name, modifier = Modifier.padding(16.dp), fontSize = 16.sp)
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val tmp = File(context.cacheDir, "klepci-export.apkg")
+                val count = core?.exportApkg(tmp.absolutePath, "")
+                context.contentResolver.openOutputStream(uri)?.use { output ->
+                    tmp.inputStream().use { input -> input.copyTo(output) }
+                }
+                status = "exported $count notes"
+            } catch (e: Exception) { onError(e.toString()) }
+        }
+    }
+
+    Column(Modifier.fillMaxSize().padding(12.dp)) {
+        OutlinedButton(
+            onClick = { editName = ""; renameId = null },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("New deck") }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { importLauncher.launch(arrayOf("*/*")) },
+                modifier = Modifier.weight(1f)
+            ) { Text("Import .apkg") }
+            OutlinedButton(
+                onClick = { exportLauncher.launch("klepci-export.apkg") },
+                modifier = Modifier.weight(1f)
+            ) { Text("Export .apkg") }
+        }
+        if (status.isNotEmpty()) {
+            Text(status, color = Color.Gray, fontSize = 12.sp,
+                modifier = Modifier.padding(vertical = 4.dp))
+        }
+        if (decks.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
+                Text("no decks yet", color = Color.Gray)
+            }
+        } else {
+            LazyColumn {
+                items(decks) { deck ->
+                    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(
+                                (if (deck.filtered) "▣ " else "") + deck.name,
+                                fontSize = 16.sp,
+                                modifier = Modifier.clickable {
+                                    try { core?.selectDeck(deck.id) }
+                                    catch (e: Exception) { onError(e.toString()) }
+                                    goReview()
+                                })
+                            Text(
+                                "${deck.new} new · ${deck.learn} learn · " +
+                                    "${deck.review} review · ${deck.total} cards",
+                                color = if (deck.new + deck.learn + deck.review == 0)
+                                    Color.Gray else Accent,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 2.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                TextButton(onClick = {
+                                    editName = deck.name; renameId = deck.id
+                                }) { Text("Rename") }
+                                TextButton(onClick = {
+                                    if (confirmDelete == deck.id) {
+                                        try {
+                                            core?.deleteDeck(deck.id)
+                                            status = "deleted ${deck.name}"
+                                            confirmDelete = null
+                                            refresh()
+                                        } catch (e: Exception) { onError(e.toString()) }
+                                    } else {
+                                        confirmDelete = deck.id
+                                        status = "tap Delete again to remove ${deck.name}"
+                                    }
+                                }) {
+                                    Text(if (confirmDelete == deck.id) "Confirm" else "Delete",
+                                        color = Again)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
+    }
+
+    editName?.let { name ->
+        AlertDialog(
+            onDismissRequest = { editName = null },
+            title = { Text(if (renameId == null) "New deck" else "Rename deck") },
+            text = {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { editName = it },
+                    label = { Text("Deck name (A::B for subdecks)") },
+                    singleLine = true)
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        if (renameId == null) {
+                            status = "created deck #${core?.addDeck(name)}"
+                        } else {
+                            core?.renameDeck(renameId!!, name)
+                            status = "renamed deck"
+                        }
+                        editName = null; renameId = null
+                        refresh()
+                    } catch (e: Exception) { onError(e.toString()) }
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editName = null; renameId = null }) { Text("Cancel") }
+            })
     }
 }
 
@@ -97,6 +226,8 @@ fun Review(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
     var done by remember { mutableStateOf(false) }
     var shownAt by remember { mutableStateOf(0L) }
     var editState by remember { mutableStateOf<EditBuf?>(null) }
+    var marked by remember { mutableStateOf(false) }
+    var flag by remember { mutableStateOf(0) }
 
     fun next() {
         answer = null
@@ -104,6 +235,8 @@ fun Review(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
             val next = core?.nextCard()
             if (next == null) { card = null; done = true } else {
                 card = next; done = false; shownAt = System.currentTimeMillis()
+                marked = core?.isMarked(next.id) ?: false
+                flag = 0
             }
         } catch (e: Exception) { onError(e.toString()) }
     }
@@ -136,6 +269,39 @@ fun Review(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Edit note") }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = {
+                        try { core?.undo(); next() } catch (e: Exception) { onError(e.toString()) }
+                    }) { Text("Undo") }
+                    TextButton(onClick = {
+                        try { core?.suspend(listOf(card!!.id), true); next() }
+                        catch (e: Exception) { onError(e.toString()) }
+                    }) { Text("Suspend") }
+                    TextButton(onClick = {
+                        try { core?.bury(listOf(card!!.id)); next() }
+                        catch (e: Exception) { onError(e.toString()) }
+                    }) { Text("Bury") }
+                    TextButton(onClick = {
+                        try { marked = core?.toggleMark(card!!.id) ?: marked }
+                        catch (e: Exception) { onError(e.toString()) }
+                    }) { Text(if (marked) "Unmark" else "Mark") }
+                }
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text("flag:", modifier = Modifier.padding(top = 10.dp), fontSize = 12.sp)
+                    (0..7).forEach { value ->
+                        TextButton(onClick = {
+                            try {
+                                flag = value
+                                core?.flagCard(card!!.id, value.toUInt())
+                            } catch (e: Exception) { onError(e.toString()) }
+                        }, colors = if (flag == value)
+                            ButtonDefaults.textButtonColors(contentColor = Accent)
+                        else ButtonDefaults.textButtonColors()) { Text("$value") }
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 if (answer == null) {
                     Button(onClick = {

@@ -37,6 +37,10 @@ enum KeyAction {
     Show,
     Edit,
     Answer(u8),
+    Undo,
+    Suspend,
+    Bury,
+    Mark,
 }
 
 struct KlepciApp {
@@ -44,8 +48,17 @@ struct KlepciApp {
     error: Option<String>,
     tab: Tab,
     decks: Vec<DeckInfo>,
+    deck_overview: Vec<klep_core::DeckCounts>,
+    current_deck: Option<String>,
+    new_deck_name: String,
+    apkg_path: String,
+    apkg_status: Option<String>,
+    renaming: Option<(i64, String)>,
+    confirm_deck_delete: Option<i64>,
+    deck_status: Option<String>,
     card: Option<CardView>,
     answer: Option<AnswerView>,
+    marked: bool,
     shown_at: Option<Instant>,
     done_message: Option<String>,
     stats: Option<serde_json::Value>,
@@ -80,8 +93,17 @@ impl KlepciApp {
             error: None,
             tab: Tab::Decks,
             decks: vec![],
+            deck_overview: vec![],
+            current_deck: None,
+            new_deck_name: String::new(),
+            apkg_path: String::new(),
+            apkg_status: None,
+            renaming: None,
+            confirm_deck_delete: None,
+            deck_status: None,
             card: None,
             answer: None,
+            marked: false,
             shown_at: None,
             done_message: None,
             stats: None,
@@ -133,6 +155,111 @@ impl KlepciApp {
             }
             None => self.error = Some("no collection open".to_string()),
         }
+        self.refresh_deck_overview();
+    }
+
+    fn refresh_deck_overview(&mut self) {
+        let overview = self.core.as_mut().map(|core| core.deck_overview());
+        match overview {
+            Some(result) => {
+                if let Some(decks) = self.fail(result) {
+                    self.deck_overview = decks;
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn import_apkg(&mut self) {
+        let path = self.apkg_path.trim().to_string();
+        if path.is_empty() {
+            self.apkg_status = Some("enter a path to an .apkg".to_string());
+            return;
+        }
+        let result = self.core.as_mut().map(|core| core.import_apkg(&path));
+        match result {
+            Some(result) => {
+                if let Some(count) = self.fail(result) {
+                    self.apkg_status = Some(format!("imported {count} new notes"));
+                    self.refresh_decks();
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn export_apkg(&mut self) {
+        let path = self.apkg_path.trim().to_string();
+        if path.is_empty() {
+            self.apkg_status = Some("enter an output path ending in .apkg".to_string());
+            return;
+        }
+        let result = self.core.as_mut().map(|core| core.export_apkg(&path, ""));
+        match result {
+            Some(result) => {
+                if let Some(count) = self.fail(result) {
+                    self.apkg_status = Some(format!("exported {count} notes"));
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn create_deck(&mut self) {
+        let name = self.new_deck_name.trim().to_string();
+        if name.is_empty() {
+            self.deck_status = Some("deck name required".to_string());
+            return;
+        }
+        let result = self.core.as_mut().map(|core| core.add_deck(&name));
+        match result {
+            Some(result) => {
+                if let Some(id) = self.fail(result) {
+                    self.deck_status = Some(format!("created deck #{id}"));
+                    self.new_deck_name.clear();
+                    self.refresh_decks();
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn save_rename(&mut self) {
+        let Some((deck_id, name)) = self.renaming.clone() else {
+            return;
+        };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.deck_status = Some("deck name required".to_string());
+            return;
+        }
+        let result = self
+            .core
+            .as_mut()
+            .map(|core| core.rename_deck(deck_id, &name));
+        match result {
+            Some(result) => {
+                if self.fail(result).is_some() {
+                    self.renaming = None;
+                    self.refresh_decks();
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn delete_deck(&mut self, deck_id: i64) {
+        let result = self.core.as_mut().map(|core| core.delete_deck(deck_id));
+        match result {
+            Some(result) => {
+                if let Some(count) = self.fail(result) {
+                    self.deck_status = Some(format!("deleted deck (+{count} cards)"));
+                    self.confirm_deck_delete = None;
+                    self.refresh_decks();
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
     }
 
     fn next(&mut self) {
@@ -140,12 +267,19 @@ impl KlepciApp {
         self.answer = None;
         self.shown_at = None;
         self.done_message = None;
+        self.marked = false;
         let next = self.core.as_mut().map(|core| core.next_card());
         match next {
             Some(result) => match self.fail(result) {
                 Some(Some(card)) => {
+                    let marked = self
+                        .core
+                        .as_mut()
+                        .and_then(|core| core.is_marked(card.id).ok())
+                        .unwrap_or(false);
                     self.card = Some(card);
                     self.shown_at = Some(Instant::now());
+                    self.marked = marked;
                 }
                 Some(None) => self.done_message = Some("done for now 🎉".to_string()),
                 None => {}
@@ -186,6 +320,74 @@ impl KlepciApp {
             Some(result) => {
                 if self.fail(result).is_some() {
                     self.next();
+                    self.refresh_deck_overview();
+                }
+            }
+            None => self.error = Some("no collection open".to_string()),
+        }
+    }
+
+    fn undo(&mut self) {
+        let result = self.core.as_mut().map(|core| core.undo());
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.done_message = None;
+                self.next();
+                self.refresh_deck_overview();
+            }
+        }
+    }
+
+    fn suspend_current(&mut self) {
+        let Some(card) = self.card.clone() else {
+            return;
+        };
+        let result = self
+            .core
+            .as_mut()
+            .map(|core| core.suspend(&[card.id], true));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.done_message = None;
+                self.next();
+                self.refresh_deck_overview();
+            }
+        }
+    }
+
+    fn bury_current(&mut self) {
+        let Some(card) = self.card.clone() else {
+            return;
+        };
+        let result = self.core.as_mut().map(|core| core.bury(&[card.id]));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.done_message = None;
+                self.next();
+                self.refresh_deck_overview();
+            }
+        }
+    }
+
+    fn flag_current(&mut self, flag: u32) {
+        let Some(card) = self.card.clone() else {
+            return;
+        };
+        let result = self.core.as_mut().map(|core| core.flag_card(card.id, flag));
+        if let Some(result) = result {
+            self.fail(result);
+        }
+    }
+
+    fn mark_current(&mut self) {
+        let Some(card) = self.card.clone() else {
+            return;
+        };
+        let result = self.core.as_mut().map(|core| core.toggle_mark(card.id));
+        match result {
+            Some(result) => {
+                if let Some(marked) = self.fail(result) {
+                    self.marked = marked;
                 }
             }
             None => self.error = Some("no collection open".to_string()),
@@ -366,6 +568,18 @@ impl eframe::App for KlepciApp {
                 if input.key_pressed(egui::Key::E) {
                     key_action = Some(KeyAction::Edit);
                 }
+                if input.key_pressed(egui::Key::U) {
+                    key_action = Some(KeyAction::Undo);
+                }
+                if input.key_pressed(egui::Key::S) {
+                    key_action = Some(KeyAction::Suspend);
+                }
+                if input.key_pressed(egui::Key::B) {
+                    key_action = Some(KeyAction::Bury);
+                }
+                if input.key_pressed(egui::Key::M) {
+                    key_action = Some(KeyAction::Mark);
+                }
                 for (key, rating) in [
                     (egui::Key::Num1, 1),
                     (egui::Key::Num2, 2),
@@ -382,6 +596,10 @@ impl eframe::App for KlepciApp {
             Some(KeyAction::Show) => self.show(),
             Some(KeyAction::Edit) => self.start_edit(),
             Some(KeyAction::Answer(rating)) => self.answer(rating),
+            Some(KeyAction::Undo) => self.undo(),
+            Some(KeyAction::Suspend) => self.suspend_current(),
+            Some(KeyAction::Bury) => self.bury_current(),
+            Some(KeyAction::Mark) => self.mark_current(),
             None => {}
         }
 
@@ -431,23 +649,136 @@ impl eframe::App for KlepciApp {
 
 impl KlepciApp {
     fn view_decks(&mut self, ui: &mut egui::Ui) {
-        if self.decks.is_empty() {
+        if self.core.is_none() {
+            ui.centered_and_justified(|ui| ui.label("no collection open"));
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [(ui.available_width() - 110.0).max(120.0), 28.0],
+                egui::TextEdit::singleline(&mut self.new_deck_name).hint_text("New deck (A::B)"),
+            );
+            if ui.button("Create").clicked() {
+                self.create_deck();
+            }
+        });
+        if let Some(status) = &self.deck_status.clone() {
+            ui.label(egui::RichText::new(status).small().weak());
+        }
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [(ui.available_width() - 190.0).max(120.0), 28.0],
+                egui::TextEdit::singleline(&mut self.apkg_path).hint_text("/path/to/deck.apkg"),
+            );
+            if ui.button("Import .apkg").clicked() {
+                self.import_apkg();
+            }
+            if ui.button("Export .apkg").clicked() {
+                self.export_apkg();
+            }
+        });
+        if let Some(status) = &self.apkg_status.clone() {
+            ui.label(egui::RichText::new(status).small().weak());
+        }
+        ui.separator();
+        if self.deck_overview.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.label("no decks yet — import an .apkg in Anki first");
             });
             return;
         }
+        let mut open_deck = None;
+        let mut start_rename = None;
+        let mut request_delete = None;
+        let mut save_rename = false;
+        let mut cancel_rename = false;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for deck in self.decks.clone() {
-                if ui
-                    .add_sized([ui.available_width(), 44.0], egui::Button::new(&deck.name))
-                    .clicked()
-                {
+            for deck in self.deck_overview.clone() {
+                let counts = format!(
+                    "{} new · {} learn · {} review",
+                    deck.new, deck.learn, deck.review
+                );
+                if let Some((editing_id, name)) = self.renaming.as_mut() {
+                    if *editing_id == deck.id {
+                        ui.horizontal(|ui| {
+                            ui.add_space(deck.level as f32 * 14.0);
+                            ui.add_sized(
+                                [(ui.available_width() - 150.0).max(120.0), 28.0],
+                                egui::TextEdit::singleline(name),
+                            );
+                            if ui.button("Save").clicked() {
+                                save_rename = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel_rename = true;
+                            }
+                        });
+                        continue;
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.add_space(deck.level.saturating_sub(1) as f32 * 14.0);
+                    let title = if deck.filtered {
+                        format!("▣ {}", deck.name)
+                    } else {
+                        deck.name.clone()
+                    };
+                    let button = egui::Button::new(egui::RichText::new(title).strong())
+                        .min_size(egui::vec2((ui.available_width() - 250.0).max(80.0), 34.0));
+                    if ui.add(button).clicked() {
+                        open_deck = Some(deck.id);
+                    }
+                    let text = if deck.total == 0 && deck.new + deck.learn + deck.review == 0 {
+                        format!("empty · {counts}")
+                    } else {
+                        format!("{} cards · {counts}", deck.total)
+                    };
+                    ui.label(egui::RichText::new(text).small().weak());
+                    if ui.small_button("Rename").clicked() {
+                        start_rename = Some((deck.id, deck.name.clone()));
+                    }
+                    if self.confirm_deck_delete == Some(deck.id) {
+                        if ui.small_button("Confirm delete").clicked() {
+                            request_delete = Some(deck.id);
+                        }
+                    } else if ui.small_button("Delete").clicked() {
+                        request_delete = Some(deck.id);
+                    }
+                });
+            }
+        });
+        if let Some(deck_id) = open_deck {
+            self.current_deck = self
+                .deck_overview
+                .iter()
+                .find(|deck| deck.id == deck_id)
+                .map(|deck| deck.name.clone());
+            let result = self.core.as_mut().map(|core| core.select_deck(deck_id));
+            if let Some(result) = result {
+                if self.fail(result).is_some() {
                     self.tab = Tab::Review;
                     self.next();
                 }
             }
-        });
+        }
+        if let Some((id, name)) = start_rename {
+            self.renaming = Some((id, name));
+            self.confirm_deck_delete = None;
+        }
+        if save_rename {
+            self.save_rename();
+        }
+        if cancel_rename {
+            self.renaming = None;
+        }
+        if let Some(deck_id) = request_delete {
+            if self.confirm_deck_delete == Some(deck_id) {
+                self.delete_deck(deck_id);
+            } else {
+                self.confirm_deck_delete = Some(deck_id);
+                self.deck_status = Some("click Delete again to confirm".to_string());
+            }
+        }
     }
 
     fn view_review(&mut self, ui: &mut egui::Ui) {
@@ -467,6 +798,9 @@ impl KlepciApp {
             });
             return;
         };
+        if let Some(deck) = &self.current_deck {
+            ui.label(egui::RichText::new(deck).small().weak());
+        }
         let style = ui.ctx().global_style();
         egui::Frame::group(&style).show(ui, |ui| {
             ui.add_space(8.0);
@@ -507,6 +841,35 @@ impl KlepciApp {
                 }
             });
         }
+        ui.add_space(10.0);
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            if ui.small_button("Undo (U)").clicked() {
+                self.undo();
+            }
+            if ui.small_button("Suspend (S)").clicked() {
+                self.suspend_current();
+            }
+            if ui.small_button("Bury (B)").clicked() {
+                self.bury_current();
+            }
+            if ui
+                .small_button(if self.marked {
+                    "Unmark (M)"
+                } else {
+                    "Mark (M)"
+                })
+                .clicked()
+            {
+                self.mark_current();
+            }
+            ui.label("flag:");
+            for flag in 0..=7 {
+                if ui.small_button(format!("{flag}")).clicked() {
+                    self.flag_current(flag);
+                }
+            }
+        });
     }
 
     fn view_browse(&mut self, ui: &mut egui::Ui) {

@@ -9,6 +9,8 @@ final class KlepciModel: ObservableObject {
     @Published var card: (id: Int64, question: String)? = nil
     @Published var answer: String? = nil
     @Published var done = false
+    @Published var marked = false
+    @Published var flagValue = 0
     @Published var error: String? = nil
     @Published var heat: [(day: Int64, reviews: Int)] = []
     @Published var slowest: [SlowCard] = []
@@ -23,8 +25,43 @@ final class KlepciModel: ObservableObject {
     }
 
     func refreshDecks() {
-        // decks = (try? core.decks().map { DeckRow(id: $0.id, name: $0.name) }) ?? []
+        // let rows = try? core.deckOverview()
+        // decks = (rows ?? []).map {
+        //     DeckRow(id: $0.id, name: $0.name, level: Int($0.level),
+        //             newCount: Int($0.new), learnCount: Int($0.learn),
+        //             reviewCount: Int($0.review), total: Int($0.total),
+        //             filtered: $0.filtered)
+        // }
         decks = []
+    }
+
+    @Published var deckEditName = ""
+    @Published var deckEditId: Int64? = nil
+    @Published var showDeckEditor = false
+    @Published var deckStatus = ""
+
+    func createDeck() {
+        // deckStatus = "created #\(try? core.addDeck(name: deckEditName))"
+        deckEditName = ""
+        showDeckEditor = false
+        refreshDecks()
+    }
+
+    func renameDeck() {
+        // if let id = deckEditId { try? core.renameDeck(deckId: id, name: deckEditName) }
+        deckEditId = nil
+        showDeckEditor = false
+        refreshDecks()
+    }
+
+    func deleteDeck(_ id: Int64) {
+        // try? core.deleteDeck(deckId: id)
+        refreshDecks()
+    }
+
+    func selectDeck(_ id: Int64) {
+        // try? core.selectDeck(deckId: id)
+        _ = id
     }
 
     func next() {
@@ -42,6 +79,30 @@ final class KlepciModel: ObservableObject {
         // let secs = UInt32(max(1, Int(Date().timeIntervalSince(shownAt))))
         // try? core.answer(cardId: id, rating: rating, secs: secs)
         next()
+    }
+
+    func undo() {
+        // try? core.undo()
+        next()
+    }
+
+    func suspendCurrent() {
+        // if let id = card?.id { try? core.suspend(ids: [id], suspend: true) }
+        next()
+    }
+
+    func buryCurrent() {
+        // if let id = card?.id { try? core.bury(ids: [id]) }
+        next()
+    }
+
+    func toggleMark() {
+        // if let id = card?.id { marked = (try? core.toggleMark(cardId: id)) ?? marked }
+    }
+
+    func setFlag(_ flag: UInt32) {
+        // if let id = card?.id { try? core.flagCard(cardId: id, flag: flag) }
+        flagValue = Int(flag)
     }
 
     func loadStats() {

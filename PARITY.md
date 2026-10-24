@@ -14,9 +14,9 @@ Legend: ✅ done · 🚧 in progress · ❌ not started · ➖ intentionally dif
 | Again/Hard/Good/Easy | ✅ | + keyboard 1-4/space (desktop/TUI) |
 | Answer timer | ✅ | measured, stored in revlog |
 | Media render (img/audio) | ❌ | v1.1: `media_bytes` + playback |
-| Undo last review | ❌ | backend `undo()` exists |
-| Suspend / bury / flag / mark | ❌ | backend ops exist |
-| Edit current note | ❌ | needs editor screen |
+| Undo last review | ✅ | undoes any last op; review resumes |
+| Suspend / bury / flag / mark | ✅ | susp/bury, flags 0-7, Anki `marked` tag |
+| Edit current note | ✅ | desktop form, TUI `$EDITOR`, mobile sheet/dialog |
 | Audio replay key | ❌ | with media playback |
 
 ## Browser
@@ -49,12 +49,13 @@ Legend: ✅ done · 🚧 in progress · ❌ not started · ➖ intentionally dif
 
 | Capability | Status | Notes |
 |---|---|---|
-| Deck list | ✅ | counts in v1.1 |
-| Deck overview (new/learn/review counts) | ❌ | `QueuedCards` counts exist |
+| Deck list | ✅ | with live due counts, indent, filtered marker |
+| Deck overview (new/learn/review counts) | ✅ | today's counts, children summed |
 | Options / presets (full) | ❌ | 30+ fields; big screen |
-| Add / rename / delete deck | ❌ | |
+| Add / rename / delete deck | ✅ | two-click delete; children follow rename/delete |
+| Deck-scoped review | ✅ | selecting a deck sets the review queue |
 | Filtered decks + custom study | ❌ | |
-| Import / export `.apkg` | ❌ | backend exists |
+| Import / export `.apkg` | ✅ | stock importer/exporter, media included |
 
 ## Stats
 

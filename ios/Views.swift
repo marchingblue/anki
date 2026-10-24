@@ -3,20 +3,75 @@ import SwiftUI
 struct DecksView: View {
     @ObservedObject var model: KlepciModel
     var goReview: () -> Void
+    @State private var confirmDelete: Int64? = nil
 
     var body: some View {
-        Group {
-            if model.decks.isEmpty {
-                VStack { Text("no decks yet").foregroundStyle(.secondary) }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List(model.decks) { deck in
-                    Button(deck.name) { goReview() }
+        List {
+            Section {
+                Button("New deck") {
+                    model.deckEditName = ""
+                    model.deckEditId = nil
+                    model.showDeckEditor = true
                 }
+                if !model.deckStatus.isEmpty {
+                    Text(model.deckStatus).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            ForEach(model.decks) { deck in
+                VStack(alignment: .leading, spacing: 2) {
+                    Button((deck.filtered ? "▣ " : "") + deck.name) {
+                        model.selectDeck(deck.id)
+                        goReview()
+                    }
+                        .font(.body.weight(.semibold))
+                    Text("\(deck.newCount) new · \(deck.learnCount) learn · " +
+                         "\(deck.reviewCount) review · \(deck.total) cards")
+                        .font(.caption)
+                        .foregroundStyle(deck.newCount + deck.learnCount + deck.reviewCount == 0
+                                         ? .secondary : Color.accentColor)
+                    HStack {
+                        Button("Rename") {
+                            model.deckEditName = deck.name
+                            model.deckEditId = deck.id
+                            model.showDeckEditor = true
+                        }
+                        .font(.caption)
+                        Button(confirmDelete == deck.id ? "Confirm delete" : "Delete",
+                               role: .destructive) {
+                            if confirmDelete == deck.id {
+                                model.deleteDeck(deck.id)
+                                confirmDelete = nil
+                            } else {
+                                confirmDelete = deck.id
+                            }
+                        }
+                        .font(.caption)
+                    }
+                }
+                .padding(.leading, CGFloat(max(0, deck.level - 1)) * 14)
             }
         }
         .navigationTitle("Decks")
         .onAppear { model.refreshDecks() }
+        .sheet(isPresented: $model.showDeckEditor) {
+            NavigationStack {
+                Form {
+                    TextField("Deck name (A::B for subdecks)", text: $model.deckEditName)
+                }
+                .navigationTitle(model.deckEditId == nil ? "New deck" : "Rename deck")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { model.showDeckEditor = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            if model.deckEditId == nil { model.createDeck() }
+                            else { model.renameDeck() }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -37,6 +92,19 @@ struct ReviewView: View {
                     }
                 }
                 .padding()
+                HStack {
+                    Button("Undo") { model.undo() }
+                    Button("Suspend") { model.suspendCurrent() }
+                    Button("Bury") { model.buryCurrent() }
+                    Button(model.marked ? "Unmark" : "Mark") { model.toggleMark() }
+                    Menu("Flag \(model.flagValue)") {
+                        ForEach(0..<8, id: \.self) { value in
+                            Button("\(value)") { model.setFlag(UInt32(value)) }
+                        }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .font(.caption)
                 if model.answer == nil {
                     Button("Show answer") { model.show() }
                         .buttonStyle(.borderedProminent)

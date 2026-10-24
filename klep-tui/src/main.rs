@@ -20,11 +20,13 @@ use klep_core::AnswerView;
 use klep_core::BrowserRow;
 use klep_core::CardView;
 use klep_core::Core;
+use klep_core::DeckCounts;
 use klep_core::DeckInfo;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
+use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
@@ -60,12 +62,29 @@ enum EditTarget {
     Tag,
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum DeckEdit {
+    New,
+    Rename(i64),
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum PathAction {
+    Import,
+    Export,
+}
+
 struct App {
     core: Option<Core>,
     error: Option<String>,
     tab: Tab,
     decks: Vec<DeckInfo>,
+    deck_overview: Vec<DeckCounts>,
     deck_state: ListState,
+    deck_input: String,
+    deck_edit: Option<DeckEdit>,
+    current_deck: Option<String>,
+    confirm_deck_delete: bool,
     card: Option<CardView>,
     answer: Option<AnswerView>,
     shown_at: Option<Instant>,
@@ -79,6 +98,11 @@ struct App {
     selected: std::collections::HashSet<i64>,
     confirm_delete: bool,
     move_deck_idx: usize,
+    marked: bool,
+    flag: u32,
+    path_input: String,
+    path_action: Option<PathAction>,
+    notice: Option<String>,
 }
 
 impl App {
@@ -88,7 +112,12 @@ impl App {
             error: None,
             tab: Tab::Decks,
             decks: vec![],
+            deck_overview: vec![],
             deck_state: ListState::default(),
+            deck_input: String::new(),
+            deck_edit: None,
+            current_deck: None,
+            confirm_deck_delete: false,
             card: None,
             answer: None,
             shown_at: None,
@@ -102,6 +131,11 @@ impl App {
             selected: Default::default(),
             confirm_delete: false,
             move_deck_idx: 0,
+            marked: false,
+            flag: 0,
+            path_input: String::new(),
+            path_action: None,
+            notice: None,
         };
         match Core::open(&default_collection_path()) {
             Ok(core) => {
@@ -136,6 +170,116 @@ impl App {
                 self.decks = decks;
             }
         }
+        let overview = self.core.as_mut().map(|core| core.deck_overview());
+        if let Some(result) = overview {
+            if let Some(decks) = self.fail(result) {
+                self.deck_overview = decks;
+                if self.deck_overview.is_empty() {
+                    self.deck_state.select(None);
+                } else {
+                    let last = self.deck_overview.len() - 1;
+                    let selected = self.deck_state.selected().unwrap_or(0).min(last);
+                    self.deck_state.select(Some(selected));
+                }
+            }
+        }
+    }
+
+    fn start_path(&mut self, action: PathAction) {
+        self.path_input.clear();
+        self.path_action = Some(action);
+    }
+
+    fn commit_path(&mut self) {
+        let Some(action) = self.path_action.take() else {
+            return;
+        };
+        let path = self.path_input.trim().to_string();
+        if path.is_empty() {
+            self.error = Some("path required".to_string());
+            return;
+        }
+        let result = self.core.as_mut().map(|core| match action {
+            PathAction::Import => core
+                .import_apkg(&path)
+                .map(|count| format!("imported {count} new notes")),
+            PathAction::Export => core
+                .export_apkg(&path, "")
+                .map(|count| format!("exported {count} notes")),
+        });
+        if let Some(result) = result {
+            match result {
+                Ok(message) => {
+                    self.error = None;
+                    self.notice = Some(message);
+                    self.refresh_decks();
+                }
+                Err(err) => self.error = Some(err.to_string()),
+            }
+        }
+    }
+
+    fn start_new_deck(&mut self) {
+        self.deck_input.clear();
+        self.deck_edit = Some(DeckEdit::New);
+    }
+
+    fn start_rename_deck(&mut self) {
+        let Some(idx) = self.deck_state.selected() else {
+            return;
+        };
+        let Some(deck) = self.deck_overview.get(idx) else {
+            return;
+        };
+        self.deck_input = deck.name.clone();
+        self.deck_edit = Some(DeckEdit::Rename(deck.id));
+    }
+
+    fn commit_deck_edit(&mut self) {
+        let Some(edit) = self.deck_edit.take() else {
+            return;
+        };
+        let name = self.deck_input.trim().to_string();
+        if name.is_empty() {
+            self.error = Some("deck name required".to_string());
+            return;
+        }
+        let result = match edit {
+            DeckEdit::New => self
+                .core
+                .as_mut()
+                .map(|core| core.add_deck(&name).map(|_| ())),
+            DeckEdit::Rename(id) => self.core.as_mut().map(|core| core.rename_deck(id, &name)),
+        };
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.refresh_decks();
+            }
+        }
+    }
+
+    fn delete_selected_deck(&mut self) {
+        let Some(idx) = self.deck_state.selected() else {
+            return;
+        };
+        let Some(deck) = self.deck_overview.get(idx).cloned() else {
+            return;
+        };
+        if !self.confirm_deck_delete {
+            self.confirm_deck_delete = true;
+            self.error = Some(format!(
+                "press d again to delete {} and its cards",
+                deck.name
+            ));
+            return;
+        }
+        self.confirm_deck_delete = false;
+        let result = self.core.as_mut().map(|core| core.delete_deck(deck.id));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.refresh_decks();
+            }
+        }
     }
 
     fn next(&mut self) {
@@ -143,10 +287,17 @@ impl App {
         self.answer = None;
         self.shown_at = None;
         self.done = false;
+        self.marked = false;
+        self.flag = 0;
         let next = self.core.as_mut().map(|core| core.next_card());
         if let Some(result) = next {
             match self.fail(result) {
                 Some(Some(card)) => {
+                    self.marked = self
+                        .core
+                        .as_mut()
+                        .and_then(|core| core.is_marked(card.id).ok())
+                        .unwrap_or(false);
                     self.card = Some(card);
                     self.shown_at = Some(Instant::now());
                 }
@@ -302,6 +453,72 @@ impl App {
         }
     }
 
+    fn review_undo(&mut self) {
+        let result = self.core.as_mut().map(|core| core.undo());
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.done = false;
+                self.next();
+                self.refresh_decks();
+            }
+        }
+    }
+
+    fn review_suspend(&mut self) {
+        let Some(card) = self.card.clone() else {
+            return;
+        };
+        let result = self
+            .core
+            .as_mut()
+            .map(|core| core.suspend(&[card.id], true));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.done = false;
+                self.next();
+                self.refresh_decks();
+            }
+        }
+    }
+
+    fn review_bury(&mut self) {
+        let Some(card) = self.card.clone() else {
+            return;
+        };
+        let result = self.core.as_mut().map(|core| core.bury(&[card.id]));
+        if let Some(result) = result {
+            if self.fail(result).is_some() {
+                self.done = false;
+                self.next();
+                self.refresh_decks();
+            }
+        }
+    }
+
+    fn review_mark(&mut self) {
+        let Some(card) = self.card.clone() else {
+            return;
+        };
+        let result = self.core.as_mut().map(|core| core.toggle_mark(card.id));
+        if let Some(result) = result {
+            if let Some(marked) = self.fail(result) {
+                self.marked = marked;
+            }
+        }
+    }
+
+    fn review_flag(&mut self) {
+        let Some(card) = self.card.clone() else {
+            return;
+        };
+        self.flag = (self.flag + 1) % 8;
+        let flag = self.flag;
+        let result = self.core.as_mut().map(|core| core.flag_card(card.id, flag));
+        if let Some(result) = result {
+            self.fail(result);
+        }
+    }
+
     /// Edit the current review card in `$EDITOR`. Returns an error string
     /// for display, if anything failed.
     fn edit_in_editor(&mut self) -> Option<String> {
@@ -393,6 +610,33 @@ fn main() -> io::Result<()> {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+            app.notice = None;
+            // file path input eats all keys first
+            if app.path_action.is_some() {
+                match key.code {
+                    KeyCode::Esc => app.path_action = None,
+                    KeyCode::Enter => app.commit_path(),
+                    KeyCode::Backspace => {
+                        app.path_input.pop();
+                    }
+                    KeyCode::Char(ch) => app.path_input.push(ch),
+                    _ => {}
+                }
+                continue;
+            }
+            // deck name editing eats all keys first
+            if app.deck_edit.is_some() {
+                match key.code {
+                    KeyCode::Esc => app.deck_edit = None,
+                    KeyCode::Enter => app.commit_deck_edit(),
+                    KeyCode::Backspace => {
+                        app.deck_input.pop();
+                    }
+                    KeyCode::Char(ch) => app.deck_input.push(ch),
+                    _ => {}
+                }
+                continue;
+            }
             // text editing (search query / tag input) eats all keys first
             if let Some(target) = app.editing {
                 match key.code {
@@ -456,8 +700,7 @@ fn main() -> io::Result<()> {
                 KeyCode::Down => move_selection(&mut app, 1),
                 KeyCode::Enter => {
                     if app.tab == Tab::Decks {
-                        app.tab = Tab::Review;
-                        app.next();
+                        open_selected_deck(&mut app);
                     } else if app.tab == Tab::Review && app.answer.is_none() {
                         app.show();
                     }
@@ -467,6 +710,16 @@ fn main() -> io::Result<()> {
                     Tab::Browse => toggle_browse_selection(&mut app),
                     _ => {}
                 },
+                KeyCode::Char('n') if app.tab == Tab::Decks => app.start_new_deck(),
+                KeyCode::Char('i') if app.tab == Tab::Decks => app.start_path(PathAction::Import),
+                KeyCode::Char('x') if app.tab == Tab::Decks => app.start_path(PathAction::Export),
+                KeyCode::Char('r') if app.tab == Tab::Decks => app.start_rename_deck(),
+                KeyCode::Char('d') if app.tab == Tab::Decks => app.delete_selected_deck(),
+                KeyCode::Char('u') if app.tab == Tab::Review => app.review_undo(),
+                KeyCode::Char('s') if app.tab == Tab::Review => app.review_suspend(),
+                KeyCode::Char('b') if app.tab == Tab::Review => app.review_bury(),
+                KeyCode::Char('m') if app.tab == Tab::Review => app.review_mark(),
+                KeyCode::Char('f') if app.tab == Tab::Review => app.review_flag(),
                 KeyCode::Char('E') if app.tab == Tab::Review => match app.edit_in_editor() {
                     Some(err) => app.error = Some(err),
                     None => app.show(),
@@ -536,6 +789,23 @@ fn run_editor(path: &std::path::Path) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{editor} exited with {status}"))
+    }
+}
+
+fn open_selected_deck(app: &mut App) {
+    let Some(idx) = app.deck_state.selected() else {
+        return;
+    };
+    let Some(deck) = app.deck_overview.get(idx).cloned() else {
+        return;
+    };
+    let result = app.core.as_mut().map(|core| core.select_deck(deck.id));
+    if let Some(result) = result {
+        if app.fail(result).is_some() {
+            app.current_deck = Some(deck.name);
+            app.tab = Tab::Review;
+            app.next();
+        }
     }
 }
 
@@ -681,17 +951,86 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
     match app.tab {
         Tab::Decks => {
             let items: Vec<ListItem> = app
-                .decks
+                .deck_overview
                 .iter()
-                .map(|deck| ListItem::new(deck.name.as_str()))
+                .map(|deck| {
+                    let indent = "  ".repeat(deck.level.saturating_sub(1) as usize);
+                    let marker = if deck.filtered { "▣ " } else { "" };
+                    let counts = format!(
+                        "{} new · {} learn · {} review · {} cards",
+                        deck.new, deck.learn, deck.review, deck.total
+                    );
+                    let mut spans = vec![
+                        Span::raw(indent),
+                        Span::styled(
+                            format!("{marker}{}", deck.name),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("  "),
+                    ];
+                    if deck.new + deck.learn + deck.review == 0 {
+                        spans.push(Span::styled(counts, Style::default().fg(Color::DarkGray)));
+                    } else {
+                        spans.push(Span::styled(counts, Style::default().fg(Color::Cyan)));
+                    }
+                    ListItem::new(Line::from(spans))
+                })
                 .collect();
             frame.render_stateful_widget(
                 List::new(items)
-                    .block(Block::default().borders(Borders::ALL).title("Decks"))
+                    .block(Block::default().borders(Borders::ALL).title(
+                        "Decks — n new · r rename · d delete · i import · x export · Enter review",
+                    ))
                     .highlight_style(Style::default().bg(Color::DarkGray)),
                 chunks[1],
                 &mut app.deck_state,
             );
+            if let Some(edit) = app.deck_edit {
+                let label = match edit {
+                    DeckEdit::New => "New deck: ",
+                    DeckEdit::Rename(_) => "Rename deck: ",
+                };
+                let prompt = format!("{label}{}_", app.deck_input);
+                let area = Rect {
+                    x: chunks[1].x + 1,
+                    y: chunks[1].bottom().saturating_sub(2),
+                    width: chunks[1].width.saturating_sub(2),
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(prompt).style(Style::default().fg(Color::Yellow)),
+                    area,
+                );
+            }
+            if let Some(notice) = app.notice.clone() {
+                let area = Rect {
+                    x: chunks[1].x + 1,
+                    y: chunks[1].bottom().saturating_sub(2),
+                    width: chunks[1].width.saturating_sub(2),
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(notice).style(Style::default().fg(Color::Green)),
+                    area,
+                );
+            }
+            if let Some(action) = app.path_action {
+                let label = match action {
+                    PathAction::Import => "Import .apkg: ",
+                    PathAction::Export => "Export to .apkg: ",
+                };
+                let prompt = format!("{label}{}_", app.path_input);
+                let area = Rect {
+                    x: chunks[1].x + 1,
+                    y: chunks[1].bottom().saturating_sub(2),
+                    width: chunks[1].width.saturating_sub(2),
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(prompt).style(Style::default().fg(Color::Yellow)),
+                    area,
+                );
+            }
         }
         Tab::Review => {
             if app.done {
@@ -705,7 +1044,11 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
                 );
                 return;
             };
-            let mut text = html_to_text(&card.question);
+            let mut text = String::new();
+            if let Some(deck) = &app.current_deck {
+                text.push_str(&format!("[{deck}]\n\n"));
+            }
+            text.push_str(&html_to_text(&card.question));
             if let Some(answer) = &app.answer {
                 text.push_str("\n\n───\n\n");
                 text.push_str(&html_to_text(&answer.answer));
@@ -715,6 +1058,12 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
             if app.answer.is_some() {
                 text.push_str("\n\n[1] again  [2] hard  [3] good  [4] easy");
             }
+            text.push_str("\n[u] undo  [s] suspend  [b] bury  [m] mark  [f] flag");
+            text.push_str(&format!(
+                "  (flag {}, {})",
+                app.flag,
+                if app.marked { "marked" } else { "unmarked" }
+            ));
             text.push_str("\n[E] edit in $EDITOR  [A] add note");
             frame.render_widget(
                 Paragraph::new(text)

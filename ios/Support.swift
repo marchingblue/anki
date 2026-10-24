@@ -45,6 +45,12 @@ func formatSecs(_ s: Double) -> String {
 struct DeckRow: Identifiable {
     let id: Int64
     let name: String
+    var level: Int = 1
+    var newCount: Int = 0
+    var learnCount: Int = 0
+    var reviewCount: Int = 0
+    var total: Int = 0
+    var filtered = false
 }
 
 struct SlowCard: Identifiable {

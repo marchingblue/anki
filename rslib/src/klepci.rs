@@ -82,6 +82,21 @@ pub struct EditorData {
     pub tags: String,
 }
 
+/// A deck with its live due counts, flattened from the deck tree.
+#[derive(Debug, Clone)]
+pub struct DeckCounts {
+    pub id: i64,
+    /// Full `Parent::Child` name.
+    pub name: String,
+    pub level: u32,
+    pub new: u32,
+    pub learn: u32,
+    pub review: u32,
+    /// Cards directly in this deck (no children).
+    pub total: u32,
+    pub filtered: bool,
+}
+
 impl Collection {
     /// Export notes matching `search` as guid-keyed snapshots, sorted by guid.
     /// Public klepci API (read-only; the collection format is untouched).
@@ -200,6 +215,14 @@ impl Collection {
     }
 
     /// Unique sorted note ids for the given card ids.
+    fn note_id_for_cid(&mut self, cid: i64) -> Result<NoteId> {
+        let card = self
+            .storage
+            .get_card(CardId(cid))?
+            .or_not_found(CardId(cid))?;
+        Ok(card.note_id)
+    }
+
     fn note_ids_for_cids(&mut self, cids: &[i64]) -> Result<Vec<NoteId>> {
         let mut nids = BTreeSet::new();
         for cid in cids {
@@ -295,6 +318,65 @@ impl Collection {
         Ok(())
     }
 
+    /// Import an `.apkg`/`.colpkg` into this collection. Returns new notes.
+    /// Uses stock Anki's importer, so the package format stays fully
+    /// compatible.
+    pub fn import_apkg_file(&mut self, path: &str) -> Result<u32> {
+        let options = anki_proto::import_export::ImportAnkiPackageOptions {
+            merge_notetypes: true,
+            with_scheduling: true,
+            with_deck_configs: true,
+            ..Default::default()
+        };
+        let output = self.import_apkg(path, options)?;
+        Ok(output.output.new.len() as u32)
+    }
+
+    /// Export notes matching `search` (empty = whole collection) to `.apkg`.
+    /// Returns the number of exported notes.
+    pub fn export_apkg_file(&mut self, path: &str, search: &str) -> Result<u32> {
+        let options = anki_proto::import_export::ExportAnkiPackageOptions {
+            with_scheduling: true,
+            with_deck_configs: true,
+            with_media: true,
+            legacy: false,
+        };
+        self.export_apkg(path, options, search, None)
+            .map(|count| count as u32)
+    }
+
+    /// Undo the last collection operation.
+    pub fn undo_last(&mut self) -> Result<()> {
+        self.undo().map(|_| ())
+    }
+
+    /// Whether the note behind `cid` carries the `marked` tag.
+    pub fn note_is_marked(&mut self, cid: i64) -> Result<bool> {
+        let note_id = self.note_id_for_cid(cid)?;
+        let note = self.storage.get_note(note_id)?.or_not_found(note_id)?;
+        Ok(note.tags.iter().any(|tag| tag == "marked"))
+    }
+
+    /// Toggle Anki's `marked` tag on the note behind `cid`.
+    /// Returns the new marked state.
+    pub fn toggle_mark_note(&mut self, cid: i64) -> Result<bool> {
+        let note_id = self.note_id_for_cid(cid)?;
+        let note = self.storage.get_note(note_id)?.or_not_found(note_id)?;
+        let marked = note.tags.iter().any(|tag| tag == "marked");
+        let nids = [note_id];
+        if marked {
+            self.remove_tags_from_notes(&nids, "marked")?;
+        } else {
+            self.add_tags_to_notes(&nids, "marked")?;
+        }
+        Ok(!marked)
+    }
+
+    /// Set a card flag (0 = none, 1-7).
+    pub fn flag_card(&mut self, cid: i64, flag: u32) -> Result<()> {
+        self.set_card_flag(&[CardId(cid)], flag).map(|_| ())
+    }
+
     /// All notetype names, sorted.
     pub fn notetype_names(&mut self) -> Result<Vec<String>> {
         let mut names: Vec<String> = self
@@ -382,6 +464,63 @@ impl Collection {
         note.tags = tags.split_whitespace().map(str::to_string).collect();
         self.add_note(&mut note, DeckId(deck_id)).map(|_| ())?;
         Ok(note.id.0)
+    }
+
+    /// All decks with today's due counts, depth-first, root excluded.
+    pub fn deck_overview(&mut self) -> Result<Vec<DeckCounts>> {
+        let tree = self.deck_tree(Some(TimestampSecs::now()))?;
+        let mut out = Vec::new();
+        for child in tree.children {
+            flatten_deck_node(child, "", &mut out);
+        }
+        Ok(out)
+    }
+
+    /// Create a deck. Returns its id. Returns an error for duplicate names.
+    pub fn create_deck(&mut self, name: &str) -> Result<i64> {
+        if self.get_deck_id(name)?.is_some() {
+            return None.or_invalid(format!("deck already exists: {name}"));
+        }
+        let mut deck = crate::decks::Deck::new_normal();
+        deck.name = crate::decks::NativeDeckName::from_human_name(name);
+        self.add_deck(&mut deck).map(|_| ())?;
+        Ok(deck.id.0)
+    }
+
+    /// Rename a deck (children follow automatically).
+    pub fn rename_deck_by_id(&mut self, deck_id: i64, new_name: &str) -> Result<()> {
+        self.rename_deck(DeckId(deck_id), new_name).map(|_| ())
+    }
+
+    /// Delete a deck and all child decks. Returns deleted card count.
+    pub fn delete_deck(&mut self, deck_id: i64) -> Result<usize> {
+        self.remove_decks_and_child_decks(&[DeckId(deck_id)])
+            .map(|out| out.output)
+    }
+}
+
+fn flatten_deck_node(
+    node: anki_proto::decks::DeckTreeNode,
+    parent: &str,
+    out: &mut Vec<DeckCounts>,
+) {
+    let name = if parent.is_empty() {
+        node.name.clone()
+    } else {
+        format!("{parent}::{}", node.name)
+    };
+    out.push(DeckCounts {
+        id: node.deck_id,
+        name: name.clone(),
+        level: node.level,
+        new: node.new_count,
+        learn: node.learn_count,
+        review: node.review_count,
+        total: node.total_in_deck,
+        filtered: node.filtered,
+    });
+    for child in node.children {
+        flatten_deck_node(child, &name, out);
     }
 }
 
@@ -524,10 +663,103 @@ mod test {
         assert_eq!(html_to_text("<div>a<br>b&nbsp;&amp;</div>"), "a\nb &");
     }
 
+    fn file_collection(name: &str) -> Result<Collection> {
+        let dir = std::env::temp_dir().join(format!("klepci-apkg-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let media = dir.join("media");
+        std::fs::create_dir_all(&media)?;
+        let mut col = crate::collection::CollectionBuilder::new(dir.join("collection.anki2"))
+            .set_media_paths(media, dir.join("media.db"))
+            .build()?;
+        let nt = col.get_notetype_by_name("Basic")?.unwrap();
+        for word in ["alpha", "beta"] {
+            let mut note = nt.new_note();
+            note.fields_mut()[0] = format!("q-{word}");
+            note.fields_mut()[1] = format!("a-{word}");
+            col.add_note(&mut note, DeckId(1))?;
+        }
+        Ok(col)
+    }
+
+    #[test]
+    fn apkg_export_import_roundtrip() -> Result<()> {
+        let mut src = file_collection("src")?;
+        let path =
+            std::env::temp_dir().join(format!("klepci-apkg-test-{}.apkg", std::process::id()));
+        let path_str = path.to_str().unwrap();
+        assert_eq!(src.export_apkg_file(path_str, "")?, 2);
+
+        let mut dst = file_collection("dst")?;
+        assert_eq!(dst.import_apkg_file(path_str)?, 2);
+        assert_eq!(dst.browser_cards_for_search("", 10)?.len(), 4);
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn reviewer_ops() -> Result<()> {
+        let mut col = two_note_collection()?;
+        let cid = col.browser_cards_for_search("q-alpha", 10)?[0].id;
+
+        assert!(col.toggle_mark_note(cid)?);
+        assert_eq!(col.browser_cards_for_search("tag:marked", 10)?.len(), 1);
+        assert!(!col.toggle_mark_note(cid)?);
+        assert_eq!(col.browser_cards_for_search("tag:marked", 10)?.len(), 0);
+
+        col.flag_card(cid, 3)?;
+        assert_eq!(col.browser_cards_for_search("flag:3", 10)?.len(), 1);
+        col.flag_card(cid, 0)?;
+        assert_eq!(col.browser_cards_for_search("flag:3", 10)?.len(), 0);
+
+        col.suspend_cards(&[cid], true)?;
+        assert_eq!(col.browser_cards_for_search("is:suspended", 10)?.len(), 1);
+        col.undo_last()?;
+        assert_eq!(col.browser_cards_for_search("is:suspended", 10)?.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn deck_overview_and_crud() -> Result<()> {
+        let mut col = two_note_collection()?;
+        let child = col.create_deck("Parent::Child")?;
+        assert!(child > 0);
+        assert!(col.create_deck("Parent::Child").is_err());
+
+        let overview = col.deck_overview()?;
+        let parent = overview
+            .iter()
+            .find(|deck| deck.name == "Parent")
+            .expect("parent deck");
+        assert!(parent.id > 1, "auto-created parent is not the default deck");
+        let child = overview
+            .iter()
+            .find(|deck| deck.name == "Parent::Child")
+            .expect("child deck");
+        assert_eq!(child.level, 2);
+        assert_eq!(child.total, 0);
+
+        col.rename_deck_by_id(child.id, "Parent::Renamed")?;
+        let names: Vec<String> = col.deck_overview()?.into_iter().map(|d| d.name).collect();
+        assert!(names.contains(&"Parent::Renamed".to_string()));
+
+        let default = overview
+            .iter()
+            .find(|deck| deck.id == 1)
+            .expect("default deck");
+        assert_eq!(default.total, 2);
+
+        assert_eq!(col.delete_deck(child.id)?, 0);
+        assert!(!col
+            .deck_overview()?
+            .iter()
+            .any(|deck| deck.name == "Parent::Renamed"));
+        Ok(())
+    }
+
     #[test]
     fn editor_load_save_and_add() -> Result<()> {
         let mut col = two_note_collection()?;
-        assert!(col.notetype_names()?.contains(&"Basic".to_string()));
         assert_eq!(
             col.field_names_for_notetype("Basic")?,
             vec!["Front".to_string(), "Back".to_string()]

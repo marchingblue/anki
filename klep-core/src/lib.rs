@@ -42,6 +42,18 @@ pub struct DeckInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DeckCounts {
+    pub id: i64,
+    pub name: String,
+    pub level: u32,
+    pub new: u32,
+    pub learn: u32,
+    pub review: u32,
+    pub total: u32,
+    pub filtered: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CardView {
     pub id: i64,
     pub question: String,
@@ -99,6 +111,81 @@ impl Core {
             .into_iter()
             .map(|(id, name)| DeckInfo { id: id.0, name })
             .collect())
+    }
+
+    /// Decks with today's due counts, depth-first.
+    pub fn deck_overview(&mut self) -> Result<Vec<DeckCounts>, CoreError> {
+        self.col.deck_overview().map_err(core_err).map(|decks| {
+            decks
+                .into_iter()
+                .map(|deck| DeckCounts {
+                    id: deck.id,
+                    name: deck.name,
+                    level: deck.level,
+                    new: deck.new,
+                    learn: deck.learn,
+                    review: deck.review,
+                    total: deck.total,
+                    filtered: deck.filtered,
+                })
+                .collect()
+        })
+    }
+
+    /// Create a deck. Returns its id.
+    pub fn add_deck(&mut self, name: &str) -> Result<i64, CoreError> {
+        self.col.create_deck(name).map_err(core_err)
+    }
+
+    /// Rename a deck.
+    pub fn rename_deck(&mut self, deck_id: i64, name: &str) -> Result<(), CoreError> {
+        self.col.rename_deck_by_id(deck_id, name).map_err(core_err)
+    }
+
+    /// Delete a deck and its children. Returns deleted card count.
+    pub fn delete_deck(&mut self, deck_id: i64) -> Result<usize, CoreError> {
+        self.col.delete_deck(deck_id).map_err(core_err)
+    }
+
+    /// Make `deck_id` the deck that [`Core::next_card`] reviews.
+    pub fn select_deck(&mut self, deck_id: i64) -> Result<(), CoreError> {
+        self.shown = None;
+        self.col
+            .set_current_deck(DeckId(deck_id))
+            .map(|_| ())
+            .map_err(core_err)
+    }
+
+    /// Undo the last collection operation (review, edit, bulk op, …).
+    pub fn undo(&mut self) -> Result<(), CoreError> {
+        self.shown = None;
+        self.col.undo_last().map_err(core_err)
+    }
+
+    /// Set a card flag (0 = none, 1-7).
+    pub fn flag_card(&mut self, id: i64, flag: u32) -> Result<(), CoreError> {
+        self.col.flag_card(id, flag).map_err(core_err)
+    }
+
+    /// Toggle Anki's `marked` tag. Returns the new state.
+    pub fn toggle_mark(&mut self, card_id: i64) -> Result<bool, CoreError> {
+        self.col.toggle_mark_note(card_id).map_err(core_err)
+    }
+
+    /// Whether the note behind `card_id` is marked.
+    pub fn is_marked(&mut self, card_id: i64) -> Result<bool, CoreError> {
+        self.col.note_is_marked(card_id).map_err(core_err)
+    }
+
+    /// Import an `.apkg`/`.colpkg`. Returns the number of new notes.
+    pub fn import_apkg(&mut self, path: &str) -> Result<u32, CoreError> {
+        self.shown = None;
+        self.col.import_apkg_file(path).map_err(core_err)
+    }
+
+    /// Export notes matching `search` (empty = all) to `.apkg`.
+    pub fn export_apkg(&mut self, path: &str, search: &str) -> Result<u32, CoreError> {
+        self.col.export_apkg_file(path, search).map_err(core_err)
     }
 
     /// Next due card across the whole collection, with rendered question.
@@ -237,12 +324,15 @@ impl Core {
     }
 
     /// Suspend (`suspend=true`) or unsuspend cards by id.
+    /// Invalidates the reviewer's pending card.
     pub fn suspend(&mut self, ids: &[i64], suspend: bool) -> Result<(), CoreError> {
+        self.shown = None;
         self.col.suspend_cards(ids, suspend).map_err(core_err)
     }
 
-    /// Bury cards until tomorrow.
+    /// Bury cards until tomorrow. Invalidates the reviewer's pending card.
     pub fn bury(&mut self, ids: &[i64]) -> Result<(), CoreError> {
+        self.shown = None;
         self.col.bury_cards(ids).map_err(core_err)
     }
 
@@ -398,6 +488,68 @@ mod test {
         core.bury(&ids[1..2]).unwrap();
         assert_eq!(core.delete_cards(&ids[0..1]).unwrap(), 1);
         assert_eq!(core.search("", 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reviewer_ops() {
+        let (mut core, _guard) = test_core("reviewer_ops");
+        add_basic_note(&mut core);
+        let card = core.next_card().unwrap().expect("due card");
+        core.flag_card(card.id, 2).unwrap();
+        assert_eq!(core.search("flag:2", 10).unwrap().len(), 1);
+        assert!(core.toggle_mark(card.id).unwrap());
+        assert_eq!(core.search("tag:marked", 10).unwrap().len(), 1);
+        assert!(!core.toggle_mark(card.id).unwrap());
+        core.suspend(&[card.id], true).unwrap();
+        assert_eq!(core.search("is:suspended", 10).unwrap().len(), 1);
+        core.undo().unwrap();
+        assert_eq!(core.search("is:suspended", 10).unwrap().len(), 0);
+        core.bury(&[card.id]).unwrap();
+        assert_eq!(core.search("is:buried", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deck_crud_and_counts() {
+        let (mut core, _guard) = test_core("deck_crud");
+        add_basic_note(&mut core);
+        let overview = core.deck_overview().unwrap();
+        let default = overview.iter().find(|deck| deck.id == 1).unwrap();
+        assert!(default.total >= 1);
+
+        let id = core.add_deck("Languages::Japanese").unwrap();
+        assert!(core.add_deck("Languages::Japanese").is_err());
+        let overview = core.deck_overview().unwrap();
+        let child = overview
+            .iter()
+            .find(|deck| deck.id == id)
+            .expect("child deck");
+        assert_eq!(child.name, "Languages::Japanese");
+        assert!(overview.iter().any(|deck| deck.name == "Languages"));
+
+        core.rename_deck(id, "Languages::日本語").unwrap();
+        assert!(core
+            .deck_overview()
+            .unwrap()
+            .iter()
+            .any(|deck| deck.name == "Languages::日本語"));
+
+        core.select_deck(id).unwrap();
+        assert!(
+            core.next_card().unwrap().is_none(),
+            "empty deck has no cards"
+        );
+        core.select_deck(1).unwrap();
+        assert!(
+            core.next_card().unwrap().is_some(),
+            "default deck still has cards"
+        );
+
+        assert_eq!(core.delete_deck(id).unwrap(), 0);
+        assert!(!core
+            .deck_overview()
+            .unwrap()
+            .iter()
+            .any(|deck| deck.name == "Languages::日本語"));
     }
 
     #[test]
