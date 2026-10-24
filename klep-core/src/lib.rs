@@ -41,6 +41,144 @@ pub struct DeckInfo {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DayReviews {
+    pub day: i64,
+    pub learn: u32,
+    pub relearn: u32,
+    pub young: u32,
+    pub mature: u32,
+    pub filtered: u32,
+}
+
+impl DayReviews {
+    pub fn total(&self) -> u32 {
+        self.learn + self.relearn + self.young + self.mature + self.filtered
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DayCount {
+    pub day: i64,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct IntervalBucket {
+    pub days: u32,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EaseBucket {
+    pub ease: u32,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HourBucket {
+    pub hour: u32,
+    pub total: u32,
+    pub correct: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CardCountsBreakdown {
+    pub new: u32,
+    pub learn: u32,
+    pub relearn: u32,
+    pub young: u32,
+    pub mature: u32,
+    pub suspended: u32,
+    pub buried: u32,
+}
+
+impl CardCountsBreakdown {
+    pub fn total(&self) -> u32 {
+        self.new
+            + self.learn
+            + self.relearn
+            + self.young
+            + self.mature
+            + self.suspended
+            + self.buried
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TodayStats {
+    pub answer_count: u32,
+    pub answer_millis: u32,
+    pub correct_count: u32,
+    pub learn_count: u32,
+    pub review_count: u32,
+    pub relearn_count: u32,
+    pub mature_correct: u32,
+    pub mature_count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ButtonRow {
+    pub button: u32,
+    pub learning: u32,
+    pub young: u32,
+    pub mature: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TrueRetention {
+    pub young_passed: u32,
+    pub young_failed: u32,
+    pub mature_passed: u32,
+    pub mature_failed: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GraphsData {
+    pub reviews: Vec<DayReviews>,
+    pub added: Vec<DayCount>,
+    pub intervals: Vec<IntervalBucket>,
+    pub eases: Vec<EaseBucket>,
+    pub average_ease: f32,
+    pub hours: Vec<HourBucket>,
+    pub future_due: Vec<DayCount>,
+    pub daily_load: u32,
+    pub card_counts: CardCountsBreakdown,
+    pub today: TodayStats,
+    pub buttons: Vec<ButtonRow>,
+    pub true_retention: TrueRetention,
+    pub retrievability: f32,
+    pub fsrs: bool,
+    pub rollover_hour: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeckOptions {
+    pub deck_id: i64,
+    pub preset_id: i64,
+    pub preset_name: String,
+    pub new_per_day: u32,
+    pub reviews_per_day: u32,
+    pub learn_steps: String,
+    pub relearn_steps: String,
+    pub graduating_interval_good: u32,
+    pub graduating_interval_easy: u32,
+    pub easy_multiplier: f32,
+    pub hard_multiplier: f32,
+    pub interval_multiplier: f32,
+    pub maximum_review_interval: u32,
+    pub minimum_lapse_interval: u32,
+    pub leech_threshold: u32,
+    pub leech_action: i32,
+    pub desired_retention: f32,
+    pub fsrs: bool,
+    pub bury_new: bool,
+    pub bury_reviews: bool,
+    pub bury_interday_learning: bool,
+    pub show_timer: bool,
+    pub cap_answer_time_to_secs: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DeckCounts {
     pub id: i64,
@@ -175,6 +313,181 @@ impl Core {
     /// Whether the note behind `card_id` is marked.
     pub fn is_marked(&mut self, card_id: i64) -> Result<bool, CoreError> {
         self.col.note_is_marked(card_id).map_err(core_err)
+    }
+
+    /// Data behind the stock Anki graphs screen.
+    pub fn graphs(&mut self, search: &str, days: u32) -> Result<GraphsData, CoreError> {
+        let graphs = self.col.graphs_for_search(search, days).map_err(core_err)?;
+        Ok(GraphsData {
+            reviews: graphs
+                .reviews
+                .into_iter()
+                .map(|day| DayReviews {
+                    day: day.day,
+                    learn: day.learn,
+                    relearn: day.relearn,
+                    young: day.young,
+                    mature: day.mature,
+                    filtered: day.filtered,
+                })
+                .collect(),
+            added: graphs
+                .added
+                .into_iter()
+                .map(|day| DayCount {
+                    day: day.day,
+                    count: day.count,
+                })
+                .collect(),
+            intervals: graphs
+                .intervals
+                .into_iter()
+                .map(|bucket| IntervalBucket {
+                    days: bucket.days,
+                    count: bucket.count,
+                })
+                .collect(),
+            eases: graphs
+                .eases
+                .into_iter()
+                .map(|bucket| EaseBucket {
+                    ease: bucket.ease,
+                    count: bucket.count,
+                })
+                .collect(),
+            average_ease: graphs.average_ease,
+            hours: graphs
+                .hours
+                .into_iter()
+                .map(|bucket| HourBucket {
+                    hour: bucket.hour,
+                    total: bucket.total,
+                    correct: bucket.correct,
+                })
+                .collect(),
+            future_due: graphs
+                .future_due
+                .into_iter()
+                .map(|day| DayCount {
+                    day: day.day,
+                    count: day.count,
+                })
+                .collect(),
+            daily_load: graphs.daily_load,
+            card_counts: CardCountsBreakdown {
+                new: graphs.card_counts.new,
+                learn: graphs.card_counts.learn,
+                relearn: graphs.card_counts.relearn,
+                young: graphs.card_counts.young,
+                mature: graphs.card_counts.mature,
+                suspended: graphs.card_counts.suspended,
+                buried: graphs.card_counts.buried,
+            },
+            today: TodayStats {
+                answer_count: graphs.today.answer_count,
+                answer_millis: graphs.today.answer_millis,
+                correct_count: graphs.today.correct_count,
+                learn_count: graphs.today.learn_count,
+                review_count: graphs.today.review_count,
+                relearn_count: graphs.today.relearn_count,
+                mature_correct: graphs.today.mature_correct,
+                mature_count: graphs.today.mature_count,
+            },
+            buttons: graphs
+                .buttons
+                .into_iter()
+                .map(|row| ButtonRow {
+                    button: row.button,
+                    learning: row.learning,
+                    young: row.young,
+                    mature: row.mature,
+                })
+                .collect(),
+            true_retention: TrueRetention {
+                young_passed: graphs.true_retention.young_passed,
+                young_failed: graphs.true_retention.young_failed,
+                mature_passed: graphs.true_retention.mature_passed,
+                mature_failed: graphs.true_retention.mature_failed,
+            },
+            retrievability: graphs.retrievability,
+            fsrs: graphs.fsrs,
+            rollover_hour: graphs.rollover_hour,
+        })
+    }
+
+    /// Regex find & replace across notes matching `search`.
+    pub fn find_and_replace(
+        &mut self,
+        search: &str,
+        regex: &str,
+        replacement: &str,
+        field: Option<&str>,
+    ) -> Result<usize, CoreError> {
+        self.col
+            .find_and_replace_notes(search, regex, replacement, field)
+            .map_err(core_err)
+    }
+
+    /// Options of the preset used by `deck_id`.
+    pub fn deck_options(&mut self, deck_id: i64) -> Result<DeckOptions, CoreError> {
+        self.col
+            .deck_options_for_deck(deck_id)
+            .map_err(core_err)
+            .map(|options| DeckOptions {
+                deck_id: options.deck_id,
+                preset_id: options.preset_id,
+                preset_name: options.preset_name,
+                new_per_day: options.new_per_day,
+                reviews_per_day: options.reviews_per_day,
+                learn_steps: options.learn_steps,
+                relearn_steps: options.relearn_steps,
+                graduating_interval_good: options.graduating_interval_good,
+                graduating_interval_easy: options.graduating_interval_easy,
+                easy_multiplier: options.easy_multiplier,
+                hard_multiplier: options.hard_multiplier,
+                interval_multiplier: options.interval_multiplier,
+                maximum_review_interval: options.maximum_review_interval,
+                minimum_lapse_interval: options.minimum_lapse_interval,
+                leech_threshold: options.leech_threshold,
+                leech_action: options.leech_action,
+                desired_retention: options.desired_retention,
+                fsrs: options.fsrs,
+                bury_new: options.bury_new,
+                bury_reviews: options.bury_reviews,
+                bury_interday_learning: options.bury_interday_learning,
+                show_timer: options.show_timer,
+                cap_answer_time_to_secs: options.cap_answer_time_to_secs,
+            })
+    }
+
+    /// Save deck options to the shared preset.
+    pub fn save_deck_options(&mut self, options: &DeckOptions) -> Result<(), CoreError> {
+        let options = anki::klepci::DeckOptions {
+            deck_id: options.deck_id,
+            preset_id: options.preset_id,
+            preset_name: options.preset_name.clone(),
+            new_per_day: options.new_per_day,
+            reviews_per_day: options.reviews_per_day,
+            learn_steps: options.learn_steps.clone(),
+            relearn_steps: options.relearn_steps.clone(),
+            graduating_interval_good: options.graduating_interval_good,
+            graduating_interval_easy: options.graduating_interval_easy,
+            easy_multiplier: options.easy_multiplier,
+            hard_multiplier: options.hard_multiplier,
+            interval_multiplier: options.interval_multiplier,
+            maximum_review_interval: options.maximum_review_interval,
+            minimum_lapse_interval: options.minimum_lapse_interval,
+            leech_threshold: options.leech_threshold,
+            leech_action: options.leech_action,
+            desired_retention: options.desired_retention,
+            fsrs: options.fsrs,
+            bury_new: options.bury_new,
+            bury_reviews: options.bury_reviews,
+            bury_interday_learning: options.bury_interday_learning,
+            show_timer: options.show_timer,
+            cap_answer_time_to_secs: options.cap_answer_time_to_secs,
+        };
+        self.col.save_deck_options(&options).map_err(core_err)
     }
 
     /// Import an `.apkg`/`.colpkg`. Returns the number of new notes.
@@ -488,6 +801,25 @@ mod test {
         core.bury(&ids[1..2]).unwrap();
         assert_eq!(core.delete_cards(&ids[0..1]).unwrap(), 1);
         assert_eq!(core.search("", 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn graphs_after_review() {
+        let (mut core, _guard) = test_core("graphs");
+        add_basic_note(&mut core);
+        let card = core.next_card().unwrap().expect("due card");
+        core.answer(card.id, 3, 4).unwrap();
+
+        let graphs = core.graphs("", 0).unwrap();
+        assert_eq!(graphs.today.answer_count, 1);
+        assert!(graphs.today.answer_millis >= 4000);
+        assert!(graphs.reviews.iter().map(DayReviews::total).sum::<u32>() >= 1);
+        assert_eq!(graphs.hours.len(), 24);
+        assert_eq!(graphs.buttons.len(), 4);
+        assert_eq!(graphs.card_counts.total(), 1);
+
+        let scoped = core.graphs("card:1", 0).unwrap();
+        assert_eq!(scoped.card_counts.total(), 1);
     }
 
     #[test]

@@ -36,6 +36,8 @@ struct DecksView: View {
                             model.showDeckEditor = true
                         }
                         .font(.caption)
+                        Button("Options") { model.openOptions(deckId: deck.id) }
+                            .font(.caption)
                         Button(confirmDelete == deck.id ? "Confirm delete" : "Delete",
                                role: .destructive) {
                             if confirmDelete == deck.id {
@@ -53,6 +55,62 @@ struct DecksView: View {
         }
         .navigationTitle("Decks")
         .onAppear { model.refreshDecks() }
+        .sheet(isPresented: $model.showOptions) {
+            NavigationStack {
+                Form {
+                    if let options = model.deckOptions {
+                        Text("Changes apply to every deck using this preset.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("New cards/day", value: Binding(
+                            get: { options.newPerDay },
+                            set: { model.deckOptions?.newPerDay = $0 }
+                        ), format: .number)
+                        TextField("Reviews/day", value: Binding(
+                            get: { options.reviewsPerDay },
+                            set: { model.deckOptions?.reviewsPerDay = $0 }
+                        ), format: .number)
+                        TextField("Learning steps", text: Binding(
+                            get: { options.learnSteps },
+                            set: { model.deckOptions?.learnSteps = $0 }
+                        ))
+                        TextField("Relearning steps", text: Binding(
+                            get: { options.relearnSteps },
+                            set: { model.deckOptions?.relearnSteps = $0 }
+                        ))
+                        TextField("Easy interval", value: Binding(
+                            get: { options.graduatingIntervalEasy },
+                            set: { model.deckOptions?.graduatingIntervalEasy = $0 }
+                        ), format: .number)
+                        TextField("Maximum interval", value: Binding(
+                            get: { options.maximumReviewInterval },
+                            set: { model.deckOptions?.maximumReviewInterval = $0 }
+                        ), format: .number)
+                        TextField("Desired retention", value: Binding(
+                            get: { options.desiredRetention },
+                            set: { model.deckOptions?.desiredRetention = $0 }
+                        ), format: .number)
+                        Toggle("FSRS scheduler", isOn: Binding(
+                            get: { options.fsrs },
+                            set: { model.deckOptions?.fsrs = $0 }
+                        ))
+                        Toggle("Show answer timer", isOn: Binding(
+                            get: { options.showTimer },
+                            set: { model.deckOptions?.showTimer = $0 }
+                        ))
+                    }
+                }
+                .navigationTitle("Options")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { model.showOptions = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") { model.saveOptions() }
+                    }
+                }
+            }
+        }
         .sheet(isPresented: $model.showDeckEditor) {
             NavigationStack {
                 Form {
@@ -167,8 +225,12 @@ struct BrowseView: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { model.runSearch() }
                 Button("Go") { model.runSearch() }
+                Button("Replace") { model.showReplace = true }
             }
             .padding(.horizontal)
+            if !model.replaceStatus.isEmpty {
+                Text(model.replaceStatus).font(.caption).foregroundStyle(.secondary)
+            }
             HStack {
                 Button("All") { model.selected = Set(model.rows.map(\.id)) }
                 Button("Susp") { /* try? core.suspendCards(ids: suspend: true) */ model.runSearch() }
@@ -202,6 +264,24 @@ struct BrowseView: View {
             }
         }
         .navigationTitle("Browse")
+        .sheet(isPresented: $model.showReplace) {
+            NavigationStack {
+                Form {
+                    TextField("find (regex)", text: $model.replaceRegex)
+                    TextField("replace with", text: $model.replaceWith)
+                    TextField("field name (optional)", text: $model.replaceField)
+                }
+                .navigationTitle("Find & replace")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { model.showReplace = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Replace all") { model.doReplace() }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -231,6 +311,70 @@ struct StatsView: View {
     var body: some View {
         List {
             Section("Answer time") { Text(model.summary) }
+            if let graphs = model.graphs {
+                Section("Today") {
+                    Text("\(graphs.today.answerCount) answers · " +
+                         String(format: "%.1f min", Double(graphs.today.answerMillis) / 60000) +
+                         " · " + String(format: "%.0f%% correct",
+                            graphs.today.answerCount == 0 ? 0 :
+                            Double(graphs.today.correctCount) / Double(graphs.today.answerCount) * 100))
+                        .font(.callout)
+                }
+                Section("Cards") {
+                    Text("\(graphs.cardCounts.new) new · \(graphs.cardCounts.learn) learn · " +
+                         "\(graphs.cardCounts.young) young · \(graphs.cardCounts.mature) mature · " +
+                         "\(graphs.cardCounts.suspended) suspended · \(graphs.cardCounts.buried) buried")
+                        .font(.caption)
+                }
+                Section("Reviews/day (30d)") {
+                    let byDay = Dictionary(uniqueKeysWithValues: graphs.reviews.map { ($0.day, $0) })
+                    SparkBars(values: (-29...0).map { byDay[Int64($0)]?.total ?? 0 },
+                              color: .accentColor)
+                }
+                Section("Added/day (30d)") {
+                    let byDay = Dictionary(uniqueKeysWithValues: graphs.added.map { ($0.day, $0.count) })
+                    SparkBars(values: (-29...0).map { byDay[Int64($0)] ?? 0 }, color: .orange)
+                }
+                Section("Future due") {
+                    let byDay = Dictionary(uniqueKeysWithValues: graphs.futureDue.map { ($0.day, $0.count) })
+                    SparkBars(values: (0..<30).map { byDay[Int64($0)] ?? 0 }, color: .green)
+                    Text("daily load \(graphs.dailyLoad)").font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Intervals") {
+                    ForEach(graphs.intervals.prefix(6)) { bucket in
+                        HBarRow(label: bucket.label, value: bucket.count,
+                                max: graphs.intervals.map(\.count).max() ?? 1, color: .green)
+                    }
+                }
+                Section("Ease") {
+                    ForEach(graphs.eases.prefix(5)) { bucket in
+                        HBarRow(label: bucket.label, value: bucket.count,
+                                max: graphs.eases.map(\.count).max() ?? 1, color: .accentColor)
+                    }
+                    Text(String(format: "average %.0f%% · retrievability %.1f%% · FSRS %@",
+                                graphs.averageEase, graphs.retrievability * 100,
+                                graphs.fsrs ? "on" : "off"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Hourly (all time)") {
+                    SparkBars(values: graphs.hours, color: .accentColor)
+                }
+                Section("Answer buttons") {
+                    ForEach(graphs.buttons) { row in
+                        HBarRow(label: ["again", "hard", "good", "easy"][max(0, min(3, row.button - 1))],
+                                value: row.total,
+                                max: graphs.buttons.map(\.total).max() ?? 1,
+                                color: .accentColor)
+                    }
+                }
+                Section("Retention") {
+                    let young = graphs.retention.youngPassed + graphs.retention.youngFailed
+                    let mature = graphs.retention.maturePassed + graphs.retention.matureFailed
+                    Text("young \(pct(graphs.retention.youngPassed, young)) (\(young) reps) · " +
+                         "mature \(pct(graphs.retention.maturePassed, mature)) (\(mature) reps)")
+                        .font(.caption)
+                }
+            }
             Section("Heat") {
                 HeatGrid(days: model.heat)
                     .frame(height: 120)
@@ -244,6 +388,55 @@ struct StatsView: View {
         }
         .navigationTitle("Stats")
         .onAppear { model.loadStats() }
+    }
+}
+
+func pct(_ part: Int, _ total: Int) -> String {
+    total == 0 ? "—" : String(format: "%.0f%%", Double(part) / Double(total) * 100)
+}
+
+struct SparkBars: View {
+    let values: [Int]
+    let color: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            let maxValue = max(1, values.max() ?? 1)
+            HStack(alignment: .bottom, spacing: 1) {
+                ForEach(values.indices, id: \.self) { index in
+                    let height = geo.size.height * CGFloat(values[index]) / CGFloat(maxValue)
+                    Rectangle()
+                        .fill(values[index] == 0 ? Color.secondary.opacity(0.2) : color)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: max(0, height))
+                }
+            }
+        }
+        .frame(height: 60)
+    }
+}
+
+struct HBarRow: View {
+    let label: String
+    let value: Int
+    let max maxValue: Int
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+                .frame(width: 56, alignment: .leading)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2).fill(Color.secondary.opacity(0.15))
+                    RoundedRectangle(cornerRadius: 2).fill(color)
+                        .frame(width: maxValue == 0 ? 0 :
+                                geo.size.width * CGFloat(value) / CGFloat(maxValue))
+                }
+            }
+            .frame(height: 10)
+            Text("\(value)").font(.caption2).foregroundStyle(.secondary)
+        }
     }
 }
 

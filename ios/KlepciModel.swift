@@ -15,6 +15,7 @@ final class KlepciModel: ObservableObject {
     @Published var heat: [(day: Int64, reviews: Int)] = []
     @Published var slowest: [SlowCard] = []
     @Published var summary: String = ""
+    @Published var graphs: GraphsRow? = nil
 
     private var shownAt = Date()
 
@@ -39,6 +40,20 @@ final class KlepciModel: ObservableObject {
     @Published var deckEditId: Int64? = nil
     @Published var showDeckEditor = false
     @Published var deckStatus = ""
+    @Published var deckOptions: DeckOptionsRow? = nil
+    @Published var showOptions = false
+
+    func openOptions(deckId: Int64) {
+        // deckOptions = (try? core.deckOptions(deckId: deckId)).map { ... }
+        showOptions = true
+    }
+
+    func saveOptions() {
+        // if let o = deckOptions { try? core.saveDeckOptions(options: o) }
+        showOptions = false
+        deckStatus = "options saved"
+        refreshDecks()
+    }
 
     func createDeck() {
         // deckStatus = "created #\(try? core.addDeck(name: deckEditName))"
@@ -107,6 +122,24 @@ final class KlepciModel: ObservableObject {
 
     func loadStats() {
         // parse try? core.timingJson(search: "", topN: 10)
+        // if let g = try? core.graphs(search: "", days: 365) {
+        //     var row = GraphsRow()
+        //     row.reviews = g.reviews.map { ... }
+        //     row.added = g.added.map { DayCountRow(day: $0.day, count: Int($0.count)) }
+        //     row.intervals = g.intervals.map { BucketRow(key: Int64($0.days), label: "\($0.days)d", count: Int($0.count)) }
+        //     row.eases = g.eases.map { BucketRow(key: Int64($0.ease), label: "\($0.ease)%", count: Int($0.count)) }
+        //     row.hours = g.hours.map { Int($0.total) }
+        //     row.futureDue = g.futureDue.map { DayCountRow(day: $0.day, count: Int($0.count)) }
+        //     row.cardCounts = CardCountsRow(new: Int(g.cardCounts.new), ...)
+        //     row.today = TodayRow(...)
+        //     row.buttons = g.buttons.map { ButtonRowData(button: Int($0.button), ...) }
+        //     row.retention = RetentionRow(...)
+        //     row.averageEase = Double(g.averageEase)
+        //     row.retrievability = Double(g.retrievability)
+        //     row.dailyLoad = Int(g.dailyLoad)
+        //     row.fsrs = g.fsrs
+        //     graphs = row
+        // }
     }
 
     // Editor state (wired to editData/saveNote/addNote/notetypeNames/
@@ -141,6 +174,20 @@ final class KlepciModel: ObservableObject {
     // Browse state (wired to searchCards/suspendCards/buryCards/deleteCards
     // once klep_mobile.swift is integrated).
     @Published var query = ""
+    @Published var showReplace = false
+    @Published var replaceRegex = ""
+    @Published var replaceWith = ""
+    @Published var replaceField = ""
+    @Published var replaceStatus = ""
+
+    func doReplace() {
+        // let count = try? core.findAndReplace(search: query, regex: replaceRegex,
+        //     replacement: replaceWith,
+        //     field: replaceField.isEmpty ? nil : replaceField)
+        replaceStatus = "replaced"
+        showReplace = false
+        runSearch()
+    }
     @Published var rows: [(id: Int64, deck: String, preview: String)] = []
     @Published var selected = Set<Int64>()
     @Published var confirmDelete = false

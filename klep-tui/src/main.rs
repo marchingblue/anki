@@ -22,6 +22,8 @@ use klep_core::CardView;
 use klep_core::Core;
 use klep_core::DeckCounts;
 use klep_core::DeckInfo;
+use klep_core::DeckOptions;
+use klep_core::GraphsData;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
@@ -74,6 +76,12 @@ enum PathAction {
     Export,
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum ReplaceStage {
+    Find,
+    Replace,
+}
+
 struct App {
     core: Option<Core>,
     error: Option<String>,
@@ -90,6 +98,7 @@ struct App {
     shown_at: Option<Instant>,
     done: bool,
     stats: Option<serde_json::Value>,
+    graphs: Option<GraphsData>,
     query: String,
     editing: Option<EditTarget>,
     tag_input: String,
@@ -102,6 +111,9 @@ struct App {
     flag: u32,
     path_input: String,
     path_action: Option<PathAction>,
+    replace_input: String,
+    replace_regex: String,
+    replace_stage: Option<ReplaceStage>,
     notice: Option<String>,
 }
 
@@ -123,6 +135,7 @@ impl App {
             shown_at: None,
             done: false,
             stats: None,
+            graphs: None,
             query: String::new(),
             editing: None,
             tag_input: String::new(),
@@ -135,6 +148,9 @@ impl App {
             flag: 0,
             path_input: String::new(),
             path_action: None,
+            replace_input: String::new(),
+            replace_regex: String::new(),
+            replace_stage: None,
             notice: None,
         };
         match Core::open(&default_collection_path()) {
@@ -347,6 +363,11 @@ impl App {
                 .and_then(|text| serde_json::from_str(&text).ok()),
             None => None,
         };
+        let graphs = self.core.as_mut().map(|core| core.graphs("", 365));
+        self.graphs = match graphs {
+            Some(result) => self.fail(result),
+            None => None,
+        };
     }
 
     fn run_search(&mut self) {
@@ -451,6 +472,76 @@ impl App {
                 self.run_search();
             }
         }
+    }
+
+    fn start_replace(&mut self) {
+        self.replace_input.clear();
+        self.replace_regex.clear();
+        self.replace_stage = Some(ReplaceStage::Find);
+    }
+
+    fn advance_replace(&mut self) {
+        match self.replace_stage {
+            Some(ReplaceStage::Find) => {
+                self.replace_regex = self.replace_input.clone();
+                self.replace_input.clear();
+                self.replace_stage = Some(ReplaceStage::Replace);
+            }
+            Some(ReplaceStage::Replace) => {
+                let regex = self.replace_regex.clone();
+                let replacement = self.replace_input.clone();
+                self.replace_stage = None;
+                if regex.is_empty() {
+                    self.error = Some("find pattern is empty".to_string());
+                    return;
+                }
+                let query = self.query.clone();
+                let result = self
+                    .core
+                    .as_mut()
+                    .map(|core| core.find_and_replace(&query, &regex, &replacement, None));
+                if let Some(result) = result {
+                    match result {
+                        Ok(count) => {
+                            self.notice = Some(format!("replaced in {count} notes"));
+                            self.run_search();
+                        }
+                        Err(err) => self.error = Some(err.to_string()),
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Edit the selected deck's options in `$EDITOR` (key=value lines).
+    fn options_in_editor(&mut self) -> Option<String> {
+        let idx = self.deck_state.selected()?;
+        let deck = self.deck_overview.get(idx)?.clone();
+        let core = self.core.as_mut()?;
+        let options = core
+            .deck_options(deck.id)
+            .map_err(|err| err.to_string())
+            .ok()?;
+        let path = std::env::temp_dir().join(format!("klepci-options-{}.txt", options.preset_id));
+        let template = render_options_template(&options);
+        if let Err(err) = std::fs::write(&path, template) {
+            return Some(err.to_string());
+        }
+        if let Err(err) = run_editor(&path) {
+            return Some(err);
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| err.to_string())
+            .ok()?;
+        let _ = std::fs::remove_file(&path);
+        let mut options = options;
+        if let Err(err) = apply_options_text(&mut options, &text) {
+            return Some(err);
+        }
+        core.save_deck_options(&options)
+            .map_err(|err| err.to_string())
+            .err()
     }
 
     fn review_undo(&mut self) {
@@ -611,6 +702,19 @@ fn main() -> io::Result<()> {
                 continue;
             }
             app.notice = None;
+            // find & replace prompts
+            if app.replace_stage.is_some() {
+                match key.code {
+                    KeyCode::Esc => app.replace_stage = None,
+                    KeyCode::Enter => app.advance_replace(),
+                    KeyCode::Backspace => {
+                        app.replace_input.pop();
+                    }
+                    KeyCode::Char(ch) => app.replace_input.push(ch),
+                    _ => {}
+                }
+                continue;
+            }
             // file path input eats all keys first
             if app.path_action.is_some() {
                 match key.code {
@@ -711,6 +815,13 @@ fn main() -> io::Result<()> {
                     _ => {}
                 },
                 KeyCode::Char('n') if app.tab == Tab::Decks => app.start_new_deck(),
+                KeyCode::Char('o') if app.tab == Tab::Decks => match app.options_in_editor() {
+                    Some(err) => app.error = Some(err),
+                    None => {
+                        app.notice = Some("deck options saved".to_string());
+                        app.refresh_decks();
+                    }
+                },
                 KeyCode::Char('i') if app.tab == Tab::Decks => app.start_path(PathAction::Import),
                 KeyCode::Char('x') if app.tab == Tab::Decks => app.start_path(PathAction::Export),
                 KeyCode::Char('r') if app.tab == Tab::Decks => app.start_rename_deck(),
@@ -732,6 +843,7 @@ fn main() -> io::Result<()> {
                 KeyCode::Char('/') if app.tab == Tab::Browse => {
                     app.editing = Some(EditTarget::Search);
                 }
+                KeyCode::Char('R') if app.tab == Tab::Browse => app.start_replace(),
                 KeyCode::Char('a') if app.tab == Tab::Browse => {
                     app.selected = app.rows.iter().map(|row| row.id).collect();
                 }
@@ -806,6 +918,150 @@ fn open_selected_deck(app: &mut App) {
             app.tab = Tab::Review;
             app.next();
         }
+    }
+}
+
+fn sparkline(values: &[u32]) -> String {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max = values.iter().max().copied().unwrap_or(1).max(1);
+    values
+        .iter()
+        .map(|value| {
+            if *value == 0 {
+                '·'
+            } else {
+                BLOCKS[((*value as f32 / max as f32) * 7.0).round() as usize]
+            }
+        })
+        .collect()
+}
+
+fn bar(value: u32, max: u32, width: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let len = ((value as f32 / max as f32) * width as f32).round() as usize;
+    "█".repeat(len.max(if value > 0 { 1 } else { 0 }))
+}
+
+fn pct_text(part: u32, total: u32) -> String {
+    if total == 0 {
+        "—".to_string()
+    } else {
+        format!("{:.0}%", part as f32 / total as f32 * 100.0)
+    }
+}
+
+fn render_options_template(options: &DeckOptions) -> String {
+    format!(
+        "# klepci deck options (preset: {})\n\
+         # numbers are minutes/days/percent as labelled; keep one key per line\n\
+         new_per_day={}\n\
+         reviews_per_day={}\n\
+         learn_steps={}\n\
+         relearn_steps={}\n\
+         graduating_interval_good={}\n\
+         graduating_interval_easy={}\n\
+         easy_multiplier={}\n\
+         hard_multiplier={}\n\
+         interval_multiplier={}\n\
+         maximum_review_interval={}\n\
+         minimum_lapse_interval={}\n\
+         leech_threshold={}\n\
+         leech_action={}\n\
+         desired_retention={}\n\
+         fsrs={}\n\
+         bury_new={}\n\
+         bury_reviews={}\n\
+         bury_interday_learning={}\n\
+         show_timer={}\n\
+         cap_answer_time_to_secs={}\n",
+        options.preset_name,
+        options.new_per_day,
+        options.reviews_per_day,
+        options.learn_steps,
+        options.relearn_steps,
+        options.graduating_interval_good,
+        options.graduating_interval_easy,
+        options.easy_multiplier,
+        options.hard_multiplier,
+        options.interval_multiplier,
+        options.maximum_review_interval,
+        options.minimum_lapse_interval,
+        options.leech_threshold,
+        options.leech_action,
+        options.desired_retention,
+        options.fsrs,
+        options.bury_new,
+        options.bury_reviews,
+        options.bury_interday_learning,
+        options.show_timer,
+        options.cap_answer_time_to_secs,
+    )
+}
+
+fn apply_options_text(options: &mut DeckOptions, text: &str) -> Result<(), String> {
+    for (line_no, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!("line {}: expected key=value", line_no + 1));
+        };
+        let key = key.trim();
+        let value = value.trim();
+        let bad = |what: &str| format!("line {}: invalid {what}: {value}", line_no + 1);
+        match key {
+            "new_per_day" => options.new_per_day = value.parse().map_err(|_| bad("u32"))?,
+            "reviews_per_day" => options.reviews_per_day = value.parse().map_err(|_| bad("u32"))?,
+            "learn_steps" => options.learn_steps = value.to_string(),
+            "relearn_steps" => options.relearn_steps = value.to_string(),
+            "graduating_interval_good" => {
+                options.graduating_interval_good = value.parse().map_err(|_| bad("u32"))?
+            }
+            "graduating_interval_easy" => {
+                options.graduating_interval_easy = value.parse().map_err(|_| bad("u32"))?
+            }
+            "easy_multiplier" => options.easy_multiplier = value.parse().map_err(|_| bad("f32"))?,
+            "hard_multiplier" => options.hard_multiplier = value.parse().map_err(|_| bad("f32"))?,
+            "interval_multiplier" => {
+                options.interval_multiplier = value.parse().map_err(|_| bad("f32"))?
+            }
+            "maximum_review_interval" => {
+                options.maximum_review_interval = value.parse().map_err(|_| bad("u32"))?
+            }
+            "minimum_lapse_interval" => {
+                options.minimum_lapse_interval = value.parse().map_err(|_| bad("u32"))?
+            }
+            "leech_threshold" => options.leech_threshold = value.parse().map_err(|_| bad("u32"))?,
+            "leech_action" => options.leech_action = value.parse().map_err(|_| bad("i32"))?,
+            "desired_retention" => {
+                options.desired_retention = value.parse().map_err(|_| bad("f32"))?
+            }
+            "fsrs" => options.fsrs = parse_bool(value).ok_or_else(|| bad("bool"))?,
+            "bury_new" => options.bury_new = parse_bool(value).ok_or_else(|| bad("bool"))?,
+            "bury_reviews" => {
+                options.bury_reviews = parse_bool(value).ok_or_else(|| bad("bool"))?
+            }
+            "bury_interday_learning" => {
+                options.bury_interday_learning = parse_bool(value).ok_or_else(|| bad("bool"))?
+            }
+            "show_timer" => options.show_timer = parse_bool(value).ok_or_else(|| bad("bool"))?,
+            "cap_answer_time_to_secs" => {
+                options.cap_answer_time_to_secs = value.parse().map_err(|_| bad("u32"))?
+            }
+            other => return Err(format!("line {}: unknown key {other}", line_no + 1)),
+        }
+    }
+    Ok(())
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
     }
 }
 
@@ -1082,10 +1338,19 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
                     Constraint::Length(3),
                 ])
                 .split(area);
-            let query_line = match app.editing {
-                Some(EditTarget::Search) => format!("query: {}▌", app.query),
-                Some(EditTarget::Tag) => format!("tag: {}▌ (enter=add)", app.tag_input),
-                None => format!("query: {}  [/] edit", app.query),
+            let query_line = if let Some(stage) = app.replace_stage {
+                match stage {
+                    ReplaceStage::Find => format!("find (regex): {}▌", app.replace_input),
+                    ReplaceStage::Replace => {
+                        format!("replace with: {}▌  (blank = delete)", app.replace_input)
+                    }
+                }
+            } else {
+                match app.editing {
+                    Some(EditTarget::Search) => format!("query: {}▌", app.query),
+                    Some(EditTarget::Tag) => format!("tag: {}▌ (enter=add)", app.tag_input),
+                    None => format!("query: {}  [/] edit [R] replace", app.query),
+                }
             };
             frame.render_widget(
                 Paragraph::new(query_line)
@@ -1122,7 +1387,7 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
             };
             frame.render_widget(
                 Paragraph::new(format!(
-                    "{} sel · [space] sel [a] all [s] susp [u] unsusp [b] bury {} [t] tag [T] untag [m] move→{} [M] target",
+                    "{} sel · [space] sel [a] all [s] susp [u] unsusp [b] bury {} [t] tag [T] untag [m] move→{} [M] target [R] replace",
                     app.selected.len(),
                     delete_hint,
                     move_target,
@@ -1143,6 +1408,163 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
             let total = stats["total_secs"].as_f64().unwrap_or(0.0);
             let header = format!("{reviews} reviews · mean {mean:.1}s · total {total:.0}s");
             let mut lines = vec![Line::from(header), Line::from("")];
+            if let Some(graphs) = app.graphs.clone() {
+                let today = &graphs.today;
+                let minutes = today.answer_millis as f64 / 60_000.0;
+                let accuracy = if today.answer_count == 0 {
+                    0.0
+                } else {
+                    today.correct_count as f64 / today.answer_count as f64 * 100.0
+                };
+                lines.push(Line::from(format!(
+                    "today: {} answers · {:.1} min · {:.0}% correct · {} learn / {} review / {} relearn",
+                    today.answer_count,
+                    minutes,
+                    accuracy,
+                    today.learn_count,
+                    today.review_count,
+                    today.relearn_count
+                )));
+                let counts = &graphs.card_counts;
+                lines.push(Line::from(format!(
+                    "cards: {} new · {} learn · {} relearn · {} young · {} mature · {} suspended · {} buried",
+                    counts.new,
+                    counts.learn,
+                    counts.relearn,
+                    counts.young,
+                    counts.mature,
+                    counts.suspended,
+                    counts.buried
+                )));
+                lines.push(Line::from(""));
+                let review_series: Vec<u32> = (0..30)
+                    .rev()
+                    .map(|offset| {
+                        graphs
+                            .reviews
+                            .iter()
+                            .find(|day| day.day == offset)
+                            .map(klep_core::DayReviews::total)
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                lines.push(Line::from(format!(
+                    "reviews/day (30d) {}  max {}",
+                    sparkline(&review_series),
+                    review_series.iter().max().copied().unwrap_or(0)
+                )));
+                let added_series: Vec<u32> = (0..30)
+                    .rev()
+                    .map(|offset| {
+                        graphs
+                            .added
+                            .iter()
+                            .find(|day| day.day == offset)
+                            .map(|day| day.count)
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                lines.push(Line::from(format!(
+                    "added/day (30d)   {}  max {}",
+                    sparkline(&added_series),
+                    added_series.iter().max().copied().unwrap_or(0)
+                )));
+                let future_series: Vec<u32> = (0..30)
+                    .map(|offset| {
+                        graphs
+                            .future_due
+                            .iter()
+                            .find(|day| day.day == offset)
+                            .map(|day| day.count)
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                lines.push(Line::from(format!(
+                    "future due (30d)  {}  load {}",
+                    sparkline(&future_series),
+                    graphs.daily_load
+                )));
+                lines.push(Line::from(""));
+                let max_interval = graphs
+                    .intervals
+                    .iter()
+                    .map(|bucket| bucket.count)
+                    .max()
+                    .unwrap_or(1);
+                for bucket in graphs.intervals.iter().take(6) {
+                    lines.push(Line::from(format!(
+                        "  interval {:>5}d {} {}",
+                        bucket.days,
+                        bar(bucket.count, max_interval, 20),
+                        bucket.count
+                    )));
+                }
+                let max_ease = graphs
+                    .eases
+                    .iter()
+                    .map(|bucket| bucket.count)
+                    .max()
+                    .unwrap_or(1);
+                for bucket in graphs.eases.iter().take(4) {
+                    lines.push(Line::from(format!(
+                        "  ease {:>3}%   {} {}",
+                        bucket.ease,
+                        bar(bucket.count, max_ease, 20),
+                        bucket.count
+                    )));
+                }
+                lines.push(Line::from(format!(
+                    "  avg ease {:.0}% · retrievability {:.1}% · FSRS {}",
+                    graphs.average_ease,
+                    graphs.retrievability * 100.0,
+                    if graphs.fsrs { "on" } else { "off" }
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!(
+                    "hourly (24h)      {}",
+                    sparkline(
+                        &graphs
+                            .hours
+                            .iter()
+                            .map(|hour| hour.total)
+                            .collect::<Vec<_>>()
+                    )
+                )));
+                let max_button = graphs
+                    .buttons
+                    .iter()
+                    .map(|row| row.learning + row.young + row.mature)
+                    .max()
+                    .unwrap_or(1);
+                for row in &graphs.buttons {
+                    let label = match row.button {
+                        1 => "again",
+                        2 => "hard ",
+                        3 => "good ",
+                        _ => "easy ",
+                    };
+                    let count = row.learning + row.young + row.mature;
+                    lines.push(Line::from(format!(
+                        "  {label} {} {}  ({} learn / {} young / {} mature)",
+                        bar(count, max_button, 16),
+                        count,
+                        row.learning,
+                        row.young,
+                        row.mature
+                    )));
+                }
+                let retention = &graphs.true_retention;
+                let young_total = retention.young_passed + retention.young_failed;
+                let mature_total = retention.mature_passed + retention.mature_failed;
+                lines.push(Line::from(format!(
+                    "  retention young {} ({} reps) · mature {} ({} reps)",
+                    pct_text(retention.young_passed, young_total),
+                    young_total,
+                    pct_text(retention.mature_passed, mature_total),
+                    mature_total
+                )));
+                lines.push(Line::from(""));
+            }
             // heat strip: one row of 26 blocks ≈ 26 weeks
             let days = stats["days"].as_array().cloned().unwrap_or_default();
             let recent: Vec<_> = days.iter().rev().take(182).rev().collect();
@@ -1196,7 +1618,11 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
 
 #[cfg(test)]
 mod test {
-    use super::{parse_edit_template, render_edit_template};
+    use super::{
+        apply_options_text, bar, parse_edit_template, pct_text, render_edit_template,
+        render_options_template, sparkline,
+    };
+    use klep_core::DeckOptions;
 
     #[test]
     fn template_roundtrip() {
@@ -1208,6 +1634,62 @@ mod test {
         assert_eq!(tags, "t1 t2");
         assert_eq!(notetype, "Basic");
         assert_eq!(deck, "Default");
+    }
+
+    fn sample_options() -> DeckOptions {
+        DeckOptions {
+            deck_id: 1,
+            preset_id: 1,
+            preset_name: "Default".to_string(),
+            new_per_day: 20,
+            reviews_per_day: 200,
+            learn_steps: "1 10".to_string(),
+            relearn_steps: "10".to_string(),
+            graduating_interval_good: 1,
+            graduating_interval_easy: 4,
+            easy_multiplier: 1.3,
+            hard_multiplier: 1.2,
+            interval_multiplier: 1.0,
+            maximum_review_interval: 36500,
+            minimum_lapse_interval: 1,
+            leech_threshold: 8,
+            leech_action: 1,
+            desired_retention: 0.9,
+            fsrs: false,
+            bury_new: false,
+            bury_reviews: false,
+            bury_interday_learning: false,
+            show_timer: false,
+            cap_answer_time_to_secs: 60,
+        }
+    }
+
+    #[test]
+    fn chart_helpers() {
+        assert_eq!(sparkline(&[0, 1, 4]), "·▃█");
+        assert_eq!(sparkline(&[]), "");
+        assert_eq!(bar(1, 4, 8), "██");
+        assert_eq!(bar(0, 4, 8), "");
+        assert_eq!(pct_text(1, 3), "33%");
+        assert_eq!(pct_text(0, 0), "—");
+    }
+
+    #[test]
+    fn options_roundtrip() {
+        let options = sample_options();
+        let text = render_options_template(&options);
+        let mut back = options.clone();
+        apply_options_text(&mut back, &text).unwrap();
+        assert_eq!(back.new_per_day, options.new_per_day);
+        assert_eq!(back.learn_steps, options.learn_steps);
+        assert_eq!(back.desired_retention, options.desired_retention);
+        assert_eq!(back.fsrs, options.fsrs);
+
+        let edited = text.replace("new_per_day=20", "new_per_day=5");
+        apply_options_text(&mut back, &edited).unwrap();
+        assert_eq!(back.new_per_day, 5);
+        assert!(apply_options_text(&mut back, "nope=1").is_err());
+        assert!(apply_options_text(&mut back, "new_per_day=x").is_err());
     }
 
     #[test]

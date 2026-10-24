@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -15,6 +16,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -78,6 +81,7 @@ fun Decks(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit, goRev
     var renameId by remember { mutableStateOf<Long?>(null) }
     var confirmDelete by remember { mutableStateOf<Long?>(null) }
     var status by remember { mutableStateOf("") }
+    var options by remember { mutableStateOf<uniffi.klep_mobile.DeckOptions?>(null) }
 
     fun refresh() {
         core?.let {
@@ -165,6 +169,10 @@ fun Decks(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit, goRev
                                     editName = deck.name; renameId = deck.id
                                 }) { Text("Rename") }
                                 TextButton(onClick = {
+                                    try { options = core?.deckOptions(deck.id) }
+                                    catch (e: Exception) { onError(e.toString()) }
+                                }) { Text("Options") }
+                                TextButton(onClick = {
                                     if (confirmDelete == deck.id) {
                                         try {
                                             core?.deleteDeck(deck.id)
@@ -186,6 +194,105 @@ fun Decks(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit, goRev
                 }
             }
         }
+    }
+
+    options?.let { opts ->
+        AlertDialog(
+            onDismissRequest = { options = null },
+            title = { Text("Options \u00b7 ${opts.presetName}") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    item {
+                        Text("Changes apply to every deck using this preset.",
+                            fontSize = 12.sp, color = Color.Gray)
+                    }
+                    item {
+                        NumberField("New cards/day", opts.newPerDay.toString()) { v ->
+                            options = opts.copy(newPerDay = v.toUIntOrNull() ?: opts.newPerDay)
+                        }
+                    }
+                    item {
+                        NumberField("Maximum reviews/day", opts.reviewsPerDay.toString()) { v ->
+                            options = opts.copy(reviewsPerDay = v.toUIntOrNull() ?: opts.reviewsPerDay)
+                        }
+                    }
+                    item {
+                        NumberField("Learning steps (min)", opts.learnSteps) { v ->
+                            options = opts.copy(learnSteps = v)
+                        }
+                    }
+                    item {
+                        NumberField("Relearning steps (min)", opts.relearnSteps) { v ->
+                            options = opts.copy(relearnSteps = v)
+                        }
+                    }
+                    item {
+                        NumberField("Graduating interval (good)", opts.graduatingIntervalGood.toString()) { v ->
+                            options = opts.copy(graduatingIntervalGood = v.toUIntOrNull() ?: opts.graduatingIntervalGood)
+                        }
+                    }
+                    item {
+                        NumberField("Easy interval", opts.graduatingIntervalEasy.toString()) { v ->
+                            options = opts.copy(graduatingIntervalEasy = v.toUIntOrNull() ?: opts.graduatingIntervalEasy)
+                        }
+                    }
+                    item {
+                        NumberField("Easy bonus", opts.easyMultiplier.toString()) { v ->
+                            options = opts.copy(easyMultiplier = v.toFloatOrNull() ?: opts.easyMultiplier)
+                        }
+                    }
+                    item {
+                        NumberField("Hard interval", opts.hardMultiplier.toString()) { v ->
+                            options = opts.copy(hardMultiplier = v.toFloatOrNull() ?: opts.hardMultiplier)
+                        }
+                    }
+                    item {
+                        NumberField("Interval modifier", opts.intervalMultiplier.toString()) { v ->
+                            options = opts.copy(intervalMultiplier = v.toFloatOrNull() ?: opts.intervalMultiplier)
+                        }
+                    }
+                    item {
+                        NumberField("Maximum interval (days)", opts.maximumReviewInterval.toString()) { v ->
+                            options = opts.copy(maximumReviewInterval = v.toUIntOrNull() ?: opts.maximumReviewInterval)
+                        }
+                    }
+                    item {
+                        NumberField("Leech threshold", opts.leechThreshold.toString()) { v ->
+                            options = opts.copy(leechThreshold = v.toUIntOrNull() ?: opts.leechThreshold)
+                        }
+                    }
+                    item {
+                        NumberField("Desired retention", opts.desiredRetention.toString()) { v ->
+                            options = opts.copy(desiredRetention = v.toFloatOrNull() ?: opts.desiredRetention)
+                        }
+                    }
+                    item {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Switch(checked = opts.fsrs, onCheckedChange = { options = opts.copy(fsrs = it) })
+                            Text("FSRS scheduler", modifier = Modifier.padding(start = 8.dp))
+                        }
+                    }
+                    item {
+                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Switch(checked = opts.showTimer, onCheckedChange = { options = opts.copy(showTimer = it) })
+                            Text("Show answer timer", modifier = Modifier.padding(start = 8.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        options?.let { core?.saveDeckOptions(it) }
+                        options = null
+                        status = "options saved"
+                        refresh()
+                    } catch (e: Exception) { onError(e.toString()) }
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { options = null }) { Text("Cancel") }
+            })
     }
 
     editName?.let { name ->
@@ -217,6 +324,16 @@ fun Decks(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit, goRev
                 TextButton(onClick = { editName = null; renameId = null }) { Text("Cancel") }
             })
     }
+}
+
+@Composable
+fun NumberField(label: String, value: String, onChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label) },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp))
 }
 
 @Composable
@@ -389,6 +506,11 @@ fun Browse(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
     var rows by remember { mutableStateOf(listOf<uniffi.klep_mobile.BrowserRow>()) }
     var selected by remember { mutableStateOf(setOf<Long>()) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var showReplace by remember { mutableStateOf(false) }
+    var regex by remember { mutableStateOf("") }
+    var replacement by remember { mutableStateOf("") }
+    var replaceField by remember { mutableStateOf("") }
+    var replaceStatus by remember { mutableStateOf("") }
 
     fun search() {
         core?.let {
@@ -410,6 +532,10 @@ fun Browse(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
             OutlinedTextField(value = query, onValueChange = { query = it },
                 label = { Text("search") }, modifier = Modifier.weight(1f))
             Button(onClick = ::search) { Text("Go") }
+            OutlinedButton(onClick = { showReplace = true }) { Text("Replace") }
+        }
+        if (replaceStatus.isNotEmpty()) {
+            Text(replaceStatus, color = Color.Gray, fontSize = 12.sp)
         }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -437,6 +563,40 @@ fun Browse(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
                 }
             }
         }
+    }
+
+    if (showReplace) {
+        AlertDialog(
+            onDismissRequest = { showReplace = false },
+            title = { Text("Find & replace in ${rows.size} results") },
+            text = {
+                Column {
+                    OutlinedTextField(value = regex, onValueChange = { regex = it },
+                        label = { Text("find (regex)") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = replacement, onValueChange = { replacement = it },
+                        label = { Text("replace with") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = replaceField, onValueChange = { replaceField = it },
+                        label = { Text("field name (optional)") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth())
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        val count = core?.findAndReplace(
+                            query, regex, replacement,
+                            replaceField.takeIf { it.isNotBlank() })
+                        replaceStatus = "replaced in $count notes"
+                        showReplace = false
+                        search()
+                    } catch (e: Exception) { onError(e.toString()) }
+                }) { Text("Replace all") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showReplace = false }) { Text("Cancel") }
+            })
     }
 }
 
@@ -527,12 +687,48 @@ fun Add(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
 }
 
 @Composable
+@Composable
+fun Spark(values: List<Int>, color: Color) {
+    Canvas(Modifier.fillMaxWidth().height(64.dp)) {
+        val max = (values.maxOrNull() ?: 1).coerceAtLeast(1)
+        val step = size.width / values.size.coerceAtLeast(1)
+        values.forEachIndexed { index, value ->
+            val h = size.height * value / max
+            if (h > 0f) {
+                drawRect(color,
+                    topLeft = Offset(index * step + 1f, size.height - h),
+                    size = Size((step - 2f).coerceAtLeast(1f), h))
+            }
+        }
+    }
+}
+
+@Composable
+fun HBar(label: String, value: Int, max: Int, color: Color) {
+    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        modifier = Modifier.padding(vertical = 2.dp)) {
+        Text(label, fontSize = 11.sp, color = Color.Gray,
+            modifier = Modifier.width(76.dp))
+        Box(Modifier.weight(1f).height(12.dp).background(Panel)) {
+            if (max > 0 && value > 0) {
+                Box(Modifier.fillMaxWidth(value.toFloat() / max)
+                    .fillMaxHeight().background(color))
+            }
+        }
+        Text(" $value", fontSize = 11.sp)
+    }
+}
+
+@Composable
 fun Stats(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
     var json by remember { mutableStateOf<JSONObject?>(null) }
+    var graphs by remember { mutableStateOf<uniffi.klep_mobile.GraphsData?>(null) }
     LaunchedEffect(core) {
         core?.let {
-            try { json = JSONObject(it.timingJson("", 10u)) }
-            catch (e: Exception) { onError(e.toString()) }
+            try {
+                json = JSONObject(it.timingJson("", 10u))
+                graphs = it.graphs("", 365u)
+            } catch (e: Exception) { onError(e.toString()) }
         }
     }
     val stats = json
@@ -547,8 +743,87 @@ fun Stats(core: uniffi.klep_mobile.MobileCore?, onError: (String) -> Unit) {
             Text("${stats.getInt("reviews")} reviews · " +
                 "mean ${formatSecs(stats.getDouble("mean_secs"))} · " +
                 "total ${formatSecs(stats.getDouble("total_secs"))}")
-            Spacer(Modifier.height(16.dp))
-            Text("Slowest cards", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(12.dp))
+        }
+        graphs?.let { g ->
+            item {
+                val today = g.today
+                val minutes = today.answerMillis / 60000.0
+                val accuracy = if (today.answerCount == 0u) 0.0
+                    else today.correctCount.toDouble() / today.answerCount * 100.0
+                Text("Today", style = MaterialTheme.typography.titleMedium)
+                Text(String.format(java.util.Locale.US,
+                    "%.0f answers · %.1f min · %.0f%% correct",
+                    today.answerCount.toDouble(), minutes, accuracy),
+                    fontSize = 13.sp, color = Color.Gray)
+                Spacer(Modifier.height(8.dp))
+                Text("Cards", style = MaterialTheme.typography.titleMedium)
+                val counts = g.cardCounts
+                Text("${counts.new} new · ${counts.learn} learn · " +
+                    "${counts.young} young · ${counts.mature} mature · " +
+                    "${counts.suspended} suspended · ${counts.buried} buried",
+                    fontSize = 12.sp, color = Color.Gray)
+                Spacer(Modifier.height(10.dp))
+                Text("Reviews/day (30d)", style = MaterialTheme.typography.titleSmall)
+                val reviews = g.reviews.associateBy { it.day }
+                Spark((0 until 30).map { offset ->
+                    val day = reviews[(offset - 29).toLong()]
+                    if (day == null) 0 else
+                        (day.learn + day.relearn + day.young + day.mature + day.filtered).toInt()
+                }, Accent)
+                Text("Added/day (30d)", style = MaterialTheme.typography.titleSmall)
+                val added = g.added.associateBy { it.day }
+                Spark((0 until 30).map { offset ->
+                    added[(offset - 29).toLong()]?.count?.toInt() ?: 0
+                }, Hard)
+                Text("Future due (30d)", style = MaterialTheme.typography.titleSmall)
+                val due = g.futureDue.associateBy { it.day }
+                Spark((0 until 30).map { due[it.toLong()]?.count?.toInt() ?: 0 }, Good)
+                Text("daily load ${g.dailyLoad}", fontSize = 11.sp, color = Color.Gray)
+                Spacer(Modifier.height(10.dp))
+                Text("Intervals", style = MaterialTheme.typography.titleSmall)
+                val maxInterval = g.intervals.maxOfOrNull { it.count.toInt() } ?: 1
+                g.intervals.take(6).forEach { bucket ->
+                    HBar("${bucket.days}d", bucket.count.toInt(), maxInterval, Good)
+                }
+                Text("Ease", style = MaterialTheme.typography.titleSmall)
+                val maxEase = g.eases.maxOfOrNull { it.count.toInt() } ?: 1
+                g.eases.take(5).forEach { bucket ->
+                    HBar("${bucket.ease}%", bucket.count.toInt(), maxEase, Accent)
+                }
+                Text(String.format(java.util.Locale.US,
+                    "average %.0f%% · retrievability %.1f%% · FSRS %s",
+                    g.averageEase, g.retrievability * 100.0,
+                    if (g.fsrs) "on" else "off"),
+                    fontSize = 11.sp, color = Color.Gray)
+                Spacer(Modifier.height(10.dp))
+                Text("Hourly (all time)", style = MaterialTheme.typography.titleSmall)
+                Spark(g.hours.map { it.total.toInt() }, Accent)
+                Text("Answer buttons", style = MaterialTheme.typography.titleSmall)
+                val maxButton = g.buttons.maxOfOrNull {
+                    (it.learning + it.young + it.mature).toInt()
+                } ?: 1
+                g.buttons.forEach { row ->
+                    val label = when (row.button.toInt()) {
+                        1 -> "again"; 2 -> "hard"; 3 -> "good"; else -> "easy"
+                    }
+                    val total = (row.learning + row.young + row.mature).toInt()
+                    HBar(label, total, maxButton, Again)
+                    Text("  ${row.learning} learn / ${row.young} young / ${row.mature} mature",
+                        fontSize = 10.sp, color = Color.Gray)
+                }
+                val retention = g.trueRetention
+                val youngTotal = retention.youngPassed + retention.youngFailed
+                val matureTotal = retention.maturePassed + retention.matureFailed
+                fun pct(part: UInt, total: UInt) = if (total == 0u) "—"
+                    else String.format(java.util.Locale.US, "%.0f%%",
+                        part.toDouble() / total * 100.0)
+                Text("Retention: young ${pct(retention.youngPassed, youngTotal)} " +
+                    "($youngTotal) · mature ${pct(retention.maturePassed, matureTotal)} " +
+                    "($matureTotal)", fontSize = 12.sp)
+                Spacer(Modifier.height(16.dp))
+                Text("Slowest cards", style = MaterialTheme.typography.titleMedium)
+            }
         }
         val slowest = stats.getJSONArray("slowest")
         items((0 until slowest.length()).toList()) { i ->

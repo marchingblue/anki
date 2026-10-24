@@ -27,9 +27,10 @@ Legend: ✅ done · 🚧 in progress · ❌ not started · ➖ intentionally dif
 | Sort / columns | ❌ | creation order only |
 | Select + bulk suspend/bury/delete | ✅ | + unsuspend, two-click delete confirm |
 | Bulk tags / change deck / reposition | ✅ | tags+deck done; reposition later |
-| Find & replace | ❌ | |
+| Find & replace | ✅ | regex, optional field, current search scope |
 | Card info / preview | ❌ | `card_stats` RPC exists |
-| Sidebar (decks/tags/flags) | ❌ | |
+| Sidebar (decks/tags/flags) | ❌ | deck filter via search syntax for now |
+| Sort / columns | ❌ | creation order only |
 
 ## Editor / Add
 
@@ -51,7 +52,7 @@ Legend: ✅ done · 🚧 in progress · ❌ not started · ➖ intentionally dif
 |---|---|---|
 | Deck list | ✅ | with live due counts, indent, filtered marker |
 | Deck overview (new/learn/review counts) | ✅ | today's counts, children summed |
-| Options / presets (full) | ❌ | 30+ fields; big screen |
+| Options / presets | 🚧 | key scheduling/FSRS fields on all frontends; advanced orders/custom scheduling later |
 | Add / rename / delete deck | ✅ | two-click delete; children follow rename/delete |
 | Deck-scoped review | ✅ | selecting a deck sets the review queue |
 | Filtered decks + custom study | ❌ | |
@@ -62,7 +63,7 @@ Legend: ✅ done · 🚧 in progress · ❌ not started · ➖ intentionally dif
 | Capability | Status | Notes |
 |---|---|---|
 | Answer-time (mean/deviations/slowest/heatmap) | ✅ | our edge over Anki |
-| Full graphs page (30 graphs) | ❌ | `Graphs` RPC exists, needs UI |
+| Full graphs page (30 graphs) | 🚧 | reviews/day, added, future due, intervals, ease, hours, buttons, retention, card counts on every frontend; FSRS simulator/workload still missing |
 
 ## System
 
@@ -82,4 +83,4 @@ Legend: ✅ done · 🚧 in progress · ❌ not started · ➖ intentionally dif
 4. Undo/suspend/bury/flag in reviewer.
 5. Media render + attach.
 6. Options/presets, filtered decks, import/export UI.
-7. Full stats graphs, preferences, maintenance tools.
+7. Remaining graphs (FSRS simulator/workload), preferences, maintenance tools.

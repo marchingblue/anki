@@ -82,6 +82,142 @@ pub struct EditorData {
     pub tags: String,
 }
 
+/// One day's review counts, grouped by card maturity like stock Anki.
+#[derive(Debug, Clone, Default)]
+pub struct DayReviews {
+    /// Days since Unix epoch (local day).
+    pub day: i64,
+    pub learn: u32,
+    pub relearn: u32,
+    pub young: u32,
+    pub mature: u32,
+    pub filtered: u32,
+}
+
+impl DayReviews {
+    pub fn total(&self) -> u32 {
+        self.learn + self.relearn + self.young + self.mature + self.filtered
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DayCount {
+    pub day: i64,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IntervalBucket {
+    pub days: u32,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EaseBucket {
+    /// Ease in percent, e.g. 250.
+    pub ease: u32,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HourBucket {
+    pub hour: u32,
+    pub total: u32,
+    pub correct: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CardCountsBreakdown {
+    pub new: u32,
+    pub learn: u32,
+    pub relearn: u32,
+    pub young: u32,
+    pub mature: u32,
+    pub suspended: u32,
+    pub buried: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TodayStats {
+    pub answer_count: u32,
+    pub answer_millis: u32,
+    pub correct_count: u32,
+    pub learn_count: u32,
+    pub review_count: u32,
+    pub relearn_count: u32,
+    pub mature_correct: u32,
+    pub mature_count: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ButtonRow {
+    /// 1 = again, 2 = hard, 3 = good, 4 = easy.
+    pub button: u32,
+    pub learning: u32,
+    pub young: u32,
+    pub mature: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TrueRetention {
+    pub young_passed: u32,
+    pub young_failed: u32,
+    pub mature_passed: u32,
+    pub mature_failed: u32,
+}
+
+/// Everything the stock Anki graph screen draws, in a frontend-friendly flat
+/// shape. Maps are sorted so charts are deterministic.
+#[derive(Debug, Clone, Default)]
+pub struct GraphsData {
+    pub reviews: Vec<DayReviews>,
+    pub added: Vec<DayCount>,
+    pub intervals: Vec<IntervalBucket>,
+    pub eases: Vec<EaseBucket>,
+    pub average_ease: f32,
+    pub hours: Vec<HourBucket>,
+    pub future_due: Vec<DayCount>,
+    pub daily_load: u32,
+    pub card_counts: CardCountsBreakdown,
+    pub today: TodayStats,
+    pub buttons: Vec<ButtonRow>,
+    pub true_retention: TrueRetention,
+    pub retrievability: f32,
+    pub fsrs: bool,
+    pub rollover_hour: u32,
+}
+
+/// Editable subset of a deck preset (stock Anki's options screen).
+#[derive(Debug, Clone)]
+pub struct DeckOptions {
+    pub deck_id: i64,
+    pub preset_id: i64,
+    pub preset_name: String,
+    pub new_per_day: u32,
+    pub reviews_per_day: u32,
+    /// Space-separated minutes, e.g. `"1 10"`.
+    pub learn_steps: String,
+    /// Space-separated minutes, e.g. `"10"`.
+    pub relearn_steps: String,
+    pub graduating_interval_good: u32,
+    pub graduating_interval_easy: u32,
+    pub easy_multiplier: f32,
+    pub hard_multiplier: f32,
+    pub interval_multiplier: f32,
+    pub maximum_review_interval: u32,
+    pub minimum_lapse_interval: u32,
+    pub leech_threshold: u32,
+    /// 0 = suspend, 1 = tag only, 2 = bury.
+    pub leech_action: i32,
+    pub desired_retention: f32,
+    pub fsrs: bool,
+    pub bury_new: bool,
+    pub bury_reviews: bool,
+    pub bury_interday_learning: bool,
+    pub show_timer: bool,
+    pub cap_answer_time_to_secs: u32,
+}
+
 /// A deck with its live due counts, flattened from the deck tree.
 #[derive(Debug, Clone)]
 pub struct DeckCounts {
@@ -318,6 +454,102 @@ impl Collection {
         Ok(())
     }
 
+    /// Data behind the graphs screen. `search` is an Anki query (empty = all),
+    /// `days` limits history (0 = all time).
+    pub fn graphs_for_search(&mut self, search: &str, days: u32) -> Result<GraphsData> {
+        let proto = self.graph_data_for_search(search, days)?;
+        Ok(graphs_data_from_proto(proto))
+    }
+
+    /// Regex find & replace across notes matching `search`. `field` limits
+    /// the replacement to a single field name. Returns changed note count.
+    pub fn find_and_replace_notes(
+        &mut self,
+        search: &str,
+        regex: &str,
+        replacement: &str,
+        field: Option<&str>,
+    ) -> Result<usize> {
+        let nids = self.search_notes_unordered(search)?;
+        self.find_and_replace(nids, regex, replacement, field.map(str::to_string))
+            .map(|out| out.output)
+    }
+
+    /// Options for the preset used by `deck_id`.
+    pub fn deck_options_for_deck(&mut self, deck_id: i64) -> Result<DeckOptions> {
+        let deck = self
+            .storage
+            .get_deck(DeckId(deck_id))?
+            .or_not_found(DeckId(deck_id))?;
+        let config_id = deck
+            .config_id()
+            .or_invalid("filtered decks have no preset")?;
+        let config = self
+            .get_deck_config(config_id, true)?
+            .or_not_found(config_id)?;
+        let fsrs = self.get_config_bool(BoolKey::Fsrs);
+        Ok(DeckOptions {
+            deck_id,
+            preset_id: config.id.0,
+            preset_name: config.name.clone(),
+            new_per_day: config.inner.new_per_day,
+            reviews_per_day: config.inner.reviews_per_day,
+            learn_steps: join_steps(&config.inner.learn_steps),
+            relearn_steps: join_steps(&config.inner.relearn_steps),
+            graduating_interval_good: config.inner.graduating_interval_good,
+            graduating_interval_easy: config.inner.graduating_interval_easy,
+            easy_multiplier: config.inner.easy_multiplier,
+            hard_multiplier: config.inner.hard_multiplier,
+            interval_multiplier: config.inner.interval_multiplier,
+            maximum_review_interval: config.inner.maximum_review_interval,
+            minimum_lapse_interval: config.inner.minimum_lapse_interval,
+            leech_threshold: config.inner.leech_threshold,
+            leech_action: config.inner.leech_action,
+            desired_retention: config.inner.desired_retention,
+            fsrs,
+            bury_new: config.inner.bury_new,
+            bury_reviews: config.inner.bury_reviews,
+            bury_interday_learning: config.inner.bury_interday_learning,
+            show_timer: config.inner.show_timer,
+            cap_answer_time_to_secs: config.inner.cap_answer_time_to_secs,
+        })
+    }
+
+    /// Save options back to the deck's preset. The preset is shared by every
+    /// deck that uses it, exactly like stock Anki.
+    pub fn save_deck_options(&mut self, options: &DeckOptions) -> Result<()> {
+        let mut config = self
+            .get_deck_config(DeckConfigId(options.preset_id), false)?
+            .or_not_found(DeckConfigId(options.preset_id))?;
+        config.inner.new_per_day = options.new_per_day;
+        config.inner.reviews_per_day = options.reviews_per_day;
+        config.inner.learn_steps = parse_steps(&options.learn_steps)?;
+        config.inner.relearn_steps = parse_steps(&options.relearn_steps)?;
+        config.inner.graduating_interval_good = options.graduating_interval_good.max(1);
+        config.inner.graduating_interval_easy = options
+            .graduating_interval_easy
+            .max(options.graduating_interval_good)
+            .max(1);
+        config.inner.easy_multiplier = options.easy_multiplier.max(1.0);
+        config.inner.hard_multiplier = options.hard_multiplier.clamp(0.5, 1.0);
+        config.inner.interval_multiplier = options.interval_multiplier.clamp(0.5, 2.0);
+        config.inner.maximum_review_interval = options.maximum_review_interval.max(1);
+        config.inner.minimum_lapse_interval = options.minimum_lapse_interval.max(1);
+        config.inner.leech_threshold = options.leech_threshold.max(1);
+        config.inner.leech_action = options.leech_action;
+        config.inner.desired_retention = options.desired_retention.clamp(0.7, 0.99);
+        config.inner.bury_new = options.bury_new;
+        config.inner.bury_reviews = options.bury_reviews;
+        config.inner.bury_interday_learning = options.bury_interday_learning;
+        config.inner.show_timer = options.show_timer;
+        config.inner.cap_answer_time_to_secs = options.cap_answer_time_to_secs;
+        self.transact(crate::ops::Op::UpdateDeckConfig, |col| {
+            col.add_or_update_deck_config(&mut config)
+        })?;
+        self.set_config_bool(BoolKey::Fsrs, options.fsrs, false)?;
+        Ok(())
+    }
+
     /// Import an `.apkg`/`.colpkg` into this collection. Returns new notes.
     /// Uses stock Anki's importer, so the package format stays fully
     /// compatible.
@@ -497,6 +729,197 @@ impl Collection {
         self.remove_decks_and_child_decks(&[DeckId(deck_id)])
             .map(|out| out.output)
     }
+}
+
+fn graphs_data_from_proto(proto: anki_proto::stats::GraphsResponse) -> GraphsData {
+    let mut reviews: Vec<DayReviews> = proto
+        .reviews
+        .map(|reviews| reviews.count)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(day, counts)| DayReviews {
+            day: day as i64,
+            learn: counts.learn,
+            relearn: counts.relearn,
+            young: counts.young,
+            mature: counts.mature,
+            filtered: counts.filtered,
+        })
+        .collect();
+    reviews.sort_by_key(|day| day.day);
+
+    let mut added: Vec<DayCount> = proto
+        .added
+        .map(|added| {
+            added
+                .added
+                .into_iter()
+                .map(|(day, count)| DayCount {
+                    day: day as i64,
+                    count,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    added.sort_by_key(|day| day.day);
+
+    let mut intervals: Vec<IntervalBucket> = proto
+        .intervals
+        .map(|intervals| {
+            intervals
+                .intervals
+                .into_iter()
+                .map(|(days, count)| IntervalBucket { days, count })
+                .collect()
+        })
+        .unwrap_or_default();
+    intervals.sort_by_key(|bucket| bucket.days);
+
+    let eases = proto.eases.unwrap_or_default();
+    let mut ease_buckets: Vec<EaseBucket> = eases
+        .eases
+        .into_iter()
+        .map(|(ease, count)| EaseBucket { ease, count })
+        .collect();
+    ease_buckets.sort_by_key(|bucket| bucket.ease);
+
+    let hours = proto
+        .hours
+        .map(|hours| {
+            hours
+                .all_time
+                .into_iter()
+                .enumerate()
+                .map(|(hour, bucket)| HourBucket {
+                    hour: hour as u32,
+                    total: bucket.total,
+                    correct: bucket.correct,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let future_due_proto = proto.future_due.unwrap_or_default();
+    let mut future_due: Vec<DayCount> = future_due_proto
+        .future_due
+        .into_iter()
+        .map(|(day, count)| DayCount {
+            day: day as i64,
+            count,
+        })
+        .collect();
+    future_due.sort_by_key(|day| day.day);
+
+    let counts = proto.card_counts.unwrap_or_default().excluding_inactive;
+    let card_counts = counts
+        .map(|counts| CardCountsBreakdown {
+            new: counts.new_cards,
+            learn: counts.learn,
+            relearn: counts.relearn,
+            young: counts.young,
+            mature: counts.mature,
+            suspended: counts.suspended,
+            buried: counts.buried,
+        })
+        .unwrap_or_default();
+
+    let today = proto.today.unwrap_or_default();
+    let today = TodayStats {
+        answer_count: today.answer_count,
+        answer_millis: today.answer_millis,
+        correct_count: today.correct_count,
+        learn_count: today.learn_count,
+        review_count: today.review_count,
+        relearn_count: today.relearn_count,
+        mature_correct: today.mature_correct,
+        mature_count: today.mature_count,
+    };
+
+    let buttons = proto.buttons.map(|buttons| {
+        let counts = buttons.all_time.unwrap_or_default();
+        let mut rows: Vec<ButtonRow> = (1..=4)
+            .map(|button| ButtonRow {
+                button,
+                ..Default::default()
+            })
+            .collect();
+        for (button, count) in counts.learning.iter().enumerate() {
+            if let Some(row) = rows.get_mut(button) {
+                row.learning = *count;
+            }
+        }
+        for (button, count) in counts.young.iter().enumerate() {
+            if let Some(row) = rows.get_mut(button) {
+                row.young = *count;
+            }
+        }
+        for (button, count) in counts.mature.iter().enumerate() {
+            if let Some(row) = rows.get_mut(button) {
+                row.mature = *count;
+            }
+        }
+        rows
+    });
+    let buttons = buttons.unwrap_or_default();
+
+    let retention = proto.true_retention.unwrap_or_default().all_time;
+    let true_retention = retention
+        .map(|retention| TrueRetention {
+            young_passed: retention.young_passed,
+            young_failed: retention.young_failed,
+            mature_passed: retention.mature_passed,
+            mature_failed: retention.mature_failed,
+        })
+        .unwrap_or_default();
+
+    GraphsData {
+        reviews,
+        added,
+        intervals,
+        eases: ease_buckets,
+        average_ease: eases.average,
+        hours,
+        future_due,
+        daily_load: future_due_proto.daily_load,
+        card_counts,
+        today,
+        buttons,
+        true_retention,
+        retrievability: proto.retrievability.map(|r| r.average).unwrap_or_default(),
+        fsrs: proto.fsrs,
+        rollover_hour: proto.rollover_hour,
+    }
+}
+
+fn join_steps(steps: &[f32]) -> String {
+    steps
+        .iter()
+        .map(|step| {
+            if step.fract() == 0.0 {
+                format!("{}", *step as i64)
+            } else {
+                format!("{step}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_steps(text: &str) -> Result<Vec<f32>> {
+    let mut steps = Vec::new();
+    for part in text.split_whitespace() {
+        let Ok(step) = part.parse::<f32>() else {
+            return None.or_invalid(format!("invalid step: {part}"));
+        };
+        if !(0.0..=10_080.0).contains(&step) {
+            return None.or_invalid(format!("step out of range: {part}"));
+        }
+        steps.push(step);
+    }
+    if steps.is_empty() {
+        return None.or_invalid("at least one step is required");
+    }
+    Ok(steps)
 }
 
 fn flatten_deck_node(
@@ -680,6 +1103,107 @@ mod test {
             col.add_note(&mut note, DeckId(1))?;
         }
         Ok(col)
+    }
+
+    fn review_first_card(col: &mut Collection) -> Result<()> {
+        let queued = col.get_next_card()?.unwrap();
+        let mut answer = crate::scheduler::answering::CardAnswer {
+            card_id: queued.card.id(),
+            current_state: queued.states.current,
+            new_state: queued.states.good,
+            rating: crate::scheduler::answering::Rating::Good,
+            answered_at: TimestampMillis::now(),
+            milliseconds_taken: 2500,
+            custom_data: None,
+            from_queue: true,
+        };
+        col.answer_card(&mut answer)?;
+        Ok(())
+    }
+
+    #[test]
+    fn graphs_expose_review_data() -> Result<()> {
+        let mut col = two_note_collection()?;
+        let empty = col.graphs_for_search("", 0)?;
+        let all_cards: u32 = [
+            empty.card_counts.new,
+            empty.card_counts.learn,
+            empty.card_counts.relearn,
+            empty.card_counts.young,
+            empty.card_counts.mature,
+            empty.card_counts.suspended,
+            empty.card_counts.buried,
+        ]
+        .into_iter()
+        .sum();
+        assert_eq!(all_cards, 2);
+        assert_eq!(empty.today.answer_count, 0);
+
+        review_first_card(&mut col)?;
+        let graphs = col.graphs_for_search("", 0)?;
+        assert_eq!(graphs.today.answer_count, 1);
+        assert!(graphs.today.answer_millis >= 2500);
+        assert!(graphs.reviews.iter().map(DayReviews::total).sum::<u32>() >= 1);
+        assert_eq!(graphs.buttons.len(), 4);
+        assert_eq!(graphs.hours.len(), 24);
+        assert!(
+            graphs.buttons[2].learning + graphs.buttons[2].young + graphs.buttons[2].mature >= 1
+        );
+        assert!(!graphs.added.is_empty());
+
+        let scoped = col.graphs_for_search("q-alpha", 0)?;
+        assert_eq!(scoped.card_counts.new, 0);
+        assert_eq!(
+            scoped.card_counts.learn
+                + scoped.card_counts.young
+                + scoped.card_counts.mature
+                + scoped.card_counts.relearn,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn find_and_replace_works() -> Result<()> {
+        let mut col = two_note_collection()?;
+        assert_eq!(
+            col.find_and_replace_notes("", "(?i)alpha", "ALPHA", Some("Front"))?,
+            1
+        );
+        assert_eq!(col.browser_cards_for_search("ALPHA", 10)?.len(), 1);
+        assert_eq!(
+            col.find_and_replace_notes("deck:Default", "q-", "question-", None)?,
+            2
+        );
+        assert_eq!(col.browser_cards_for_search("question-alpha", 10)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn deck_options_roundtrip() -> Result<()> {
+        let mut col = two_note_collection()?;
+        let mut opts = col.deck_options_for_deck(1)?;
+        assert_eq!(opts.new_per_day, 20);
+        assert_eq!(opts.learn_steps, "1 10");
+        assert_eq!(opts.relearn_steps, "10");
+
+        opts.new_per_day = 7;
+        opts.learn_steps = "5 25".to_string();
+        opts.desired_retention = 0.85;
+        opts.fsrs = true;
+        col.save_deck_options(&opts)?;
+
+        let opts = col.deck_options_for_deck(1)?;
+        assert_eq!(opts.new_per_day, 7);
+        assert_eq!(opts.learn_steps, "5 25");
+        assert!((opts.desired_retention - 0.85).abs() < 1e-6);
+        assert!(opts.fsrs);
+
+        col.undo_last()?;
+        let opts = col.deck_options_for_deck(1)?;
+        assert_eq!(opts.new_per_day, 20);
+        assert_eq!(opts.learn_steps, "1 10");
+        Ok(())
     }
 
     #[test]
